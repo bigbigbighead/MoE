@@ -101,15 +101,15 @@ def import_data(dataset, xp_dir, preprocess=True, val_split=[5, 1]):
 
 
 def get_loaders(
-    X_train,
-    y_train,
-    X_validation,
-    y_validation,
-    X_test,
-    y_test,
-    batch_size,
-    shuffle=True,
-    log=print,
+        X_train,
+        y_train,
+        X_validation,
+        y_validation,
+        X_test,
+        y_test,
+        batch_size,
+        shuffle=True,
+        log=print,
 ):
     """
     Convert arrays to data loaders

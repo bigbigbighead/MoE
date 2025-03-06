@@ -41,15 +41,15 @@ def get_accuracy_loader(model, dataloader):
 
 
 def export_results(
-    model,
-    configuration,
-    X_train,
-    y_train,
-    X_validation,
-    y_validation,
-    X_test,
-    y_test,
-    xp_dir,
+        model,
+        configuration,
+        X_train,
+        y_train,
+        X_validation,
+        y_validation,
+        X_test,
+        y_test,
+        xp_dir,
 ):
     """
     Export the results of the experiment
@@ -137,7 +137,7 @@ def export_results(
     results_export.to_csv(
         xp_dir
         + "/results_"
-        + str(configuration["dataset"])
+        + str(configuration["dataset"]).replace("/", "_")
         + "_"
         + str(configuration["model_name"])
         + "_"

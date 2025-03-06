@@ -9,14 +9,14 @@ import utils.train_and_test as tnt
 
 
 def train_model_with_prototypes(
-    configuration,
-    model,
-    epoch_update,
-    loader_train,
-    loader_validation,
-    loader_test,
-    xp_dir,
-    log=print,
+        configuration,
+        model,
+        epoch_update,
+        loader_train,
+        loader_validation,
+        loader_test,
+        xp_dir,
+        log=print,
 ):
     """
     Train a model with prototypes
@@ -83,7 +83,7 @@ def train_model_with_prototypes(
     )
     model_multi = torch.nn.DataParallel(model)
     push_epochs = [
-        i for i in range(configuration["epochs"]) if i % configuration["push_freq"] == 0
+        i for i in range(configuration["epochs"] + 1) if i % configuration["push_freq"] == 0
     ]
 
     # Training
@@ -139,7 +139,7 @@ def train_model_with_prototypes(
         )
 
         if (epoch + epoch_update >= configuration["push_start"]) and (
-            epoch + epoch_update in push_epochs
+                epoch + epoch_update in push_epochs
         ):
             # Push
             (
@@ -212,17 +212,17 @@ def train_model_with_prototypes(
 
 
 def train_model(
-    configuration,
-    model,
-    epoch_update,
-    X_train,
-    y_train,
-    X_validation,
-    y_validation,
-    X_test,
-    y_test,
-    xp_dir,
-    log=print,
+        configuration,
+        model,
+        epoch_update,
+        X_train,
+        y_train,
+        X_validation,
+        y_validation,
+        X_test,
+        y_test,
+        xp_dir,
+        log=print,
 ):
     """
     Train specified model
@@ -300,20 +300,20 @@ def train_model(
 
 
 def train_update(
-    X_train,
-    y_train,
-    X_validation,
-    y_validation,
-    X_test,
-    y_test,
-    configuration,
-    prototype_shape,
-    prototype_class_identity,
-    num_prototypes_per_class,
-    epoch_update,
-    nbclass,
-    xp_dir,
-    log,
+        X_train,
+        y_train,
+        X_validation,
+        y_validation,
+        X_test,
+        y_test,
+        configuration,
+        prototype_shape,
+        prototype_class_identity,
+        num_prototypes_per_class,
+        epoch_update,
+        nbclass,
+        xp_dir,
+        log,
 ):
     """
     Build and train the model

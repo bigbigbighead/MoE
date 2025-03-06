@@ -8,9 +8,15 @@ from utils.helpers import create_logger, save_experiment
 from utils.data_loading import import_data
 from utils.model_training import train_update
 
-
 if __name__ == "__main__":
     # Load configuration
+    print("test for remote file")
+    print("test for AutoDL")
+    print(torch.cuda.is_available())
+    num_gpus = torch.cuda.device_count()
+    print(num_gpus)
+    for i in range(num_gpus):
+        print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
     parser = argparse.ArgumentParser(description="LEXNet")
     parser.add_argument(
         "-c",
@@ -26,13 +32,13 @@ if __name__ == "__main__":
 
     # Create experiment folder
     xp_dir = (
-        "./results/"
-        + str(configuration["dataset"])
-        + "/"
-        + str(configuration["model_name"])
-        + "/"
-        + str(configuration["experiment_run"])
-        + "/"
+            "./results/"
+            + str(configuration["dataset"])
+            + "/"
+            + str(configuration["model_name"])
+            + "/"
+            + str(configuration["experiment_run"])
+            + "/"
     )
     save_experiment(xp_dir, args.config)
     log, logclose = create_logger(log_filename=os.path.join(xp_dir, "experiment.log"))

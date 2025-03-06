@@ -10,20 +10,20 @@ from utils.helpers import makedir, find_high_activation_crop
 
 
 def push_prototypes(
-    dataloader,
-    prototype_network_parallel,
-    class_specific=True,
-    preprocess_input_function=None,
-    prototype_layer_stride=1,
-    root_dir_for_saving_prototypes=None,
-    epoch_number=None,
-    prototype_img_filename_prefix=None,
-    prototype_self_act_filename_prefix=None,
-    proto_bound_boxes_filename_prefix=None,
-    save_prototype_class_identity=True,
-    prototype_activation_function_in_numpy=None,
-    percentile=95,
-    log=print,
+        dataloader,
+        prototype_network_parallel,
+        class_specific=True,
+        preprocess_input_function=None,
+        prototype_layer_stride=1,
+        root_dir_for_saving_prototypes=None,
+        epoch_number=None,
+        prototype_img_filename_prefix=None,
+        prototype_self_act_filename_prefix=None,
+        proto_bound_boxes_filename_prefix=None,
+        save_prototype_class_identity=True,
+        prototype_activation_function_in_numpy=None,
+        percentile=95,
+        log=print,
 ):
     """
     Push prototypes to latent patch from the training set
@@ -266,26 +266,26 @@ def push_prototypes(
 
 
 def update_prototypes_on_batch(
-    search_batch_input,
-    start_index_of_search_batch,
-    prototype_network_parallel,
-    epoch_number,
-    global_min_proto_dist,
-    global_min_fmap_patches,
-    global_samples_dist,
-    proto_rf_boxes,
-    proto_bound_boxes,
-    class_specific=True,
-    search_y=None,
-    nbclass=None,
-    preprocess_input_function=None,
-    prototype_layer_stride=1,
-    dir_for_saving_prototypes=None,
-    prototype_img_filename_prefix=None,
-    prototype_self_act_filename_prefix=None,
-    prototype_activation_function_in_numpy=None,
-    percentile=95,
-    log=print,
+        search_batch_input,
+        start_index_of_search_batch,
+        prototype_network_parallel,
+        epoch_number,
+        global_min_proto_dist,
+        global_min_fmap_patches,
+        global_samples_dist,
+        proto_rf_boxes,
+        proto_bound_boxes,
+        class_specific=True,
+        search_y=None,
+        nbclass=None,
+        preprocess_input_function=None,
+        prototype_layer_stride=1,
+        dir_for_saving_prototypes=None,
+        prototype_img_filename_prefix=None,
+        prototype_self_act_filename_prefix=None,
+        prototype_activation_function_in_numpy=None,
+        percentile=95,
+        log=print,
 ):
     """
     Update prototypes with current batch
@@ -399,8 +399,8 @@ def update_prototypes_on_batch(
             if len(class_to_img_index_dict[target_class]) == 0:
                 continue
             proto_dist_j = proto_dist_[class_to_img_index_dict[target_class]][
-                :, j, :, :
-            ]
+                           :, j, :, :
+                           ]
         else:
             proto_dist_j = proto_dist_[:, j, :, :]
 
@@ -418,20 +418,20 @@ def update_prototypes_on_batch(
             # Retrieve the corresponding feature map patch
             img_index_in_batch = batch_argmin_proto_dist_j[0]
             fmap_height_start_index = (
-                batch_argmin_proto_dist_j[1] * prototype_layer_stride
+                    batch_argmin_proto_dist_j[1] * prototype_layer_stride
             )
             fmap_height_end_index = fmap_height_start_index + proto_h
             fmap_width_start_index = (
-                batch_argmin_proto_dist_j[2] * prototype_layer_stride
+                    batch_argmin_proto_dist_j[2] * prototype_layer_stride
             )
             fmap_width_end_index = fmap_width_start_index + proto_w
 
             batch_min_fmap_patch_j = protoL_input_[
-                img_index_in_batch,
-                :,
-                fmap_height_start_index:fmap_height_end_index,
-                fmap_width_start_index:fmap_width_end_index,
-            ]
+                                     img_index_in_batch,
+                                     :,
+                                     fmap_height_start_index:fmap_height_end_index,
+                                     fmap_width_start_index:fmap_width_end_index,
+                                     ]
 
             global_min_proto_dist[j] = batch_min_proto_dist_j
             global_min_fmap_patches[j] = batch_min_fmap_patch_j
@@ -466,8 +466,8 @@ def update_prototypes_on_batch(
                     / (proto_dist_img_j + prototype_network_parallel.module.epsilon)
                 )
             elif (
-                prototype_network_parallel.module.prototype_activation_function
-                == "linear"
+                    prototype_network_parallel.module.prototype_activation_function
+                    == "linear"
             ):
                 proto_act_img_j = max_dist - proto_dist_img_j
             else:
