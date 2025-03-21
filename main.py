@@ -10,7 +10,7 @@ from utils.model_training import train_update
 
 if __name__ == "__main__":
     # Load configuration
-    print("test for remote file")
+    print("test for remote file ")
     print("test for AutoDL")
     print(torch.cuda.is_available())
     num_gpus = torch.cuda.device_count()
@@ -47,7 +47,10 @@ if __name__ == "__main__":
     X_train, y_train, X_validation, y_validation, X_test, y_test = import_data(
         configuration["dataset"], xp_dir, val_split=configuration["validation_split"]
     )
-
+    print("X_train.shape:", X_train.shape)
+    dir = "./data/AppClassNet/easy24/"
+    train_x = np.load(os.path.join(dir, "train_x.npy"))
+    print("train_x.shape:", train_x.shape)
     # Initial values
     change = True
     epoch_update = 0

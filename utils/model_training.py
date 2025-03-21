@@ -83,7 +83,7 @@ def train_model_with_prototypes(
     )
     model_multi = torch.nn.DataParallel(model)
     push_epochs = [
-        i for i in range(configuration["epochs"] + 1) if i % configuration["push_freq"] == 0
+        i for i in range(configuration["epochs"]) if i % configuration["push_freq"] == 0
     ]
 
     # Training
@@ -133,7 +133,7 @@ def train_model_with_prototypes(
         torch.save(
             obj=model,
             f=os.path.join(
-                xp_dir,
+                xp_dir, "param/",
                 (configuration["model_name"] + "_{0:.2f}.pth").format(accu_test * 100),
             ),
         )
@@ -195,7 +195,7 @@ def train_model_with_prototypes(
                     torch.save(
                         obj=model,
                         f=os.path.join(
-                            xp_dir,
+                            xp_dir, "param/",
                             (configuration["model_name"] + "_{0:.2f}.pth").format(
                                 accu_test * 100
                             ),

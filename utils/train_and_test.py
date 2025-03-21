@@ -5,19 +5,19 @@ from utils.helpers import list_of_distances
 
 
 def train_or_test(
-    model,
-    dataloader,
-    loader_validation=None,
-    optimizer=None,
-    epoch=None,
-    epoch_update=None,
-    coefs=None,
-    tot_set=None,
-    phase=None,
-    class_specific=True,
-    use_l_mask=True,
-    xp_dir=None,
-    log=print,
+        model,
+        dataloader,
+        loader_validation=None,
+        optimizer=None,
+        epoch=None,
+        epoch_update=None,
+        coefs=None,
+        tot_set=None,
+        phase=None,
+        class_specific=True,
+        use_l_mask=True,
+        xp_dir=None,
+        log=print,
 ):
     """
     Train or test the model
@@ -94,9 +94,9 @@ def train_or_test(
 
             if class_specific:
                 max_dist = (
-                    model.module.prototype_shape[1]
-                    * model.module.prototype_shape[2]
-                    * model.module.prototype_shape[3]
+                        model.module.prototype_shape[1]
+                        * model.module.prototype_shape[2]
+                        * model.module.prototype_shape[3]
                 )
 
                 # Calculate cluster cost
@@ -154,27 +154,27 @@ def train_or_test(
             if class_specific:
                 if coefs is not None:
                     loss = (
-                        float(coefs["crs_ent"]) * cross_entropy
-                        + float(coefs["clst"]) * cluster_cost
-                        + float(coefs["sep"]) * separation_cost
-                        + float(coefs["reg_protos"]) * l21
-                        + float(coefs["reg_last"]) * l22
+                            float(coefs["crs_ent"]) * cross_entropy
+                            + float(coefs["clst"]) * cluster_cost
+                            + float(coefs["sep"]) * separation_cost
+                            + float(coefs["reg_protos"]) * l21
+                            + float(coefs["reg_last"]) * l22
                     )
                 else:
                     loss = (
-                        cross_entropy
-                        + 0.8 * cluster_cost
-                        - 0.08 * separation_cost
-                        + 1e-3 * l21
-                        + 1e-4 * l22
+                            cross_entropy
+                            + 0.8 * cluster_cost
+                            - 0.08 * separation_cost
+                            + 1e-3 * l21
+                            + 1e-4 * l22
                     )
             else:
                 if coefs is not None:
                     loss = (
-                        float(coefs["crs_ent"]) * cross_entropy
-                        + float(coefs["clst"]) * cluster_cost
-                        + float(coefs["reg_protos"]) * l21
-                        + float(coefs["reg_last"]) * l22
+                            float(coefs["crs_ent"]) * cross_entropy
+                            + float(coefs["clst"]) * cluster_cost
+                            + float(coefs["reg_protos"]) * l21
+                            + float(coefs["reg_last"]) * l22
                     )
                 else:
                     loss = cross_entropy + 0.8 * cluster_cost + 1e-3 * l21 + 1e-4 * l22
@@ -227,34 +227,34 @@ def train_or_test(
 
     f = open(xp_dir + "accuracy.log", "a")
     text = (
-        phase
-        + " "
-        + tot_set
-        + " "
-        + str(epoch + epoch_update)
-        + " "
-        + str(n_correct / n_examples)
-        + " "
-        + str(accu_validation)
+            phase
+            + " "
+            + tot_set
+            + " "
+            + str(epoch + epoch_update)
+            + " "
+            + str(n_correct / n_examples)
+            + " "
+            + str(accu_validation)
     )
     f.write(text + "\n")
-    f.close
+    f.close()
 
     return n_correct / n_examples, accu_validation
 
 
 def train(
-    model,
-    loader_train,
-    loader_validation,
-    optimizer,
-    epoch,
-    epoch_update,
-    coefs,
-    xp_dir,
-    phase,
-    class_specific=True,
-    log=print,
+        model,
+        loader_train,
+        loader_validation,
+        optimizer,
+        epoch,
+        epoch_update,
+        coefs,
+        xp_dir,
+        phase,
+        class_specific=True,
+        log=print,
 ):
     """
     Launch train
@@ -319,15 +319,15 @@ def train(
 
 
 def test(
-    model,
-    loader_test,
-    epoch,
-    epoch_update,
-    coefs,
-    xp_dir,
-    phase,
-    class_specific=True,
-    log=print,
+        model,
+        loader_test,
+        epoch,
+        epoch_update,
+        coefs,
+        xp_dir,
+        phase,
+        class_specific=True,
+        log=print,
 ):
     """
     Launch test

@@ -2,7 +2,7 @@
   "experiment_run": 1,
   "gpu": "1",
   "model_name": "lexnet",
-  "dataset": "AppClassNet/top200",
+  "dataset": "AppClassNet/easy24",
   "validation_split": [ 5,1 ],
   "epochs": 1000,
   "warm_epochs": 5,
