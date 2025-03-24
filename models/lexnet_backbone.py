@@ -65,12 +65,12 @@ class LEResidualBlock(nn.Module):
     NUM_LAYERS = 2
 
     def __init__(
-            self,
-            in_channels,
-            out_channels,
-            stride=1,
-            linear_transformation=False,
-            baseline_activation_function="relu",
+        self,
+        in_channels,
+        out_channels,
+        stride=1,
+        linear_transformation=False,
+        baseline_activation_function="relu",
     ):
         """
         Parameters
@@ -129,11 +129,11 @@ class LEXNet_features(nn.Module):
     """Class used to create the CNN backbone of LEXNet"""
 
     def __init__(
-            self,
-            block=LEResidualBlock,
-            lyrs=[2, 2],
-            ini=True,
-            baseline_activation_function="relu",
+        self,
+        block=LEResidualBlock,
+        lyrs=[2, 2],
+        ini=True,
+        baseline_activation_function="relu",
     ):
         """
         Parameters
@@ -176,7 +176,7 @@ class LEXNet_features(nn.Module):
         return out
 
     def make_layer(
-            self, block, out_channels, blocks, stride=1, baseline_activation_function="relu"
+        self, block, out_channels, blocks, stride=1, baseline_activation_function="relu"
     ):
         linear_transformation = False
         if out_channels > self.in_channels:
@@ -216,9 +216,9 @@ class LEXNet_features(nn.Module):
 
     def num_layers(self):
         return (
-                self.block.NUM_LAYERS * self.lyrs[0]
-                + self.block.NUM_LAYERS * self.lyrs[2]
-                + 1
+            self.block.NUM_LAYERS * self.lyrs[0]
+            + self.block.NUM_LAYERS * self.lyrs[2]
+            + 1
         )
 
     def __repr__(self):
