@@ -1,8 +1,8 @@
 {
-  "experiment_run": 1,
+  "experiment_run": cRT_FC,
   "gpu": "1",
   "model_name": "lexnet",
-  "dataset": "AppClassNet/easy24",
+  "dataset": "AppClassNet/top200",
   "validation_split": [ 5,1 ],
   "epochs": 1000,
   "warm_epochs": 5,

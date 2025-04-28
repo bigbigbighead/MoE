@@ -272,3 +272,4 @@ def model_lexnet(
         prototype_activation_function=configuration["prototype_activation_function"],
     )
     return model
+

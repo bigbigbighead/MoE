@@ -20,6 +20,41 @@ def dataset_class_partition(selected_classes, xp_dir, file_name):
     np.save(os.path.join(xp_dir, 'new_' + file_name + '_y.npy'), new_y_data)
 
 
+def class_balanced_partition(xp_dir, file_name, target_count=None):
+    x_file_path = os.path.join(xp_dir, file_name + '_x.npy')
+    y_file_path = os.path.join(xp_dir, file_name + '_y.npy')
+    dataset_x = np.load(x_file_path)
+    dataset_y = np.load(y_file_path)
+    # 获取每个类别的样本索引
+    unique_classes = np.unique(dataset_y)
+    class_indices = {cls: np.where(dataset_y == cls)[0] for cls in unique_classes}
+
+    # 如果没有指定目标样本数，则选择最小类别的样本数量作为目标
+    if target_count is None:
+        target_count = min(len(indices) for indices in class_indices.values())
+
+    # 对每个类别进行下采样，确保每个类别的样本数相同
+    sampled_indices = []
+    for cls, indices in class_indices.items():
+        # 随机选择目标数量的样本
+        sampled_indices.append(np.random.choice(indices, target_count, replace=False))
+
+    # 合并所有采样后的索引
+    balanced_indices = np.concatenate(sampled_indices)
+
+    # 生成平衡后的数据集
+    balanced_x = dataset_x[balanced_indices]
+    balanced_y = dataset_y[balanced_indices]
+    np.save(os.path.join(xp_dir, 'class_balanced_' + file_name + '_x.npy'), balanced_x)
+    np.save(os.path.join(xp_dir, 'class_balanced_' + file_name + '_y.npy'), balanced_y)
+    # 重新统计新训练集的类别分布
+    new_class_counts = Counter(balanced_y)
+    print("新训练集类别样本数量:")
+    for class_id, count in new_class_counts.items():
+        print(f"类别 {class_id}: {count} 样本")
+    return balanced_x, balanced_y
+
+
 def dataset_count_partition(high_acc_classes, xp_dir, file_name, count=1400):
     """把数据集的特定类的数量降到count个，其余类不变，变成新的数据集"""
     x_file_path = os.path.join(xp_dir, file_name + '_x.npy')
@@ -52,7 +87,7 @@ def dataset_count_partition(high_acc_classes, xp_dir, file_name, count=1400):
 
 
 def dataset_count_new_partition(high_acc_classes, xp_dir, file_name, count=1400):
-    """把数据集的特定类的数量降到count个，独立划出来变成新的数据集"""
+    """把数据集的特定类的数量降到count个，并将其独立划出来变成新的数据集"""
     x_file_path = os.path.join(xp_dir, file_name + '_x.npy')
     y_file_path = os.path.join(xp_dir, file_name + '_y.npy')
     dataset_x = np.load(x_file_path)
@@ -111,31 +146,32 @@ if __name__ == '__main__':
     count = 1400
     # data_count_partition(high_acc_class_test, xp_dir, "train", count)
     # print_class_distribution(xp_dir, "train")
-    dataset_count_new_partition(high_acc_class, xp_dir, "train", count)
-    dataset_class_partition(high_acc_class, xp_dir, "valid")
-    dataset_class_partition(high_acc_class, xp_dir, "test")
+    # dataset_count_new_partition(high_acc_class, xp_dir, "train", count)
+    # dataset_class_partition(high_acc_class, xp_dir, "valid")
+    # dataset_class_partition(high_acc_class, xp_dir, "test")
 
-# Class 193 Accuracy: 0.00%, Sample count: 1631
-# Class 179 Accuracy: 0.05%, Sample count: 2000
-# Class 140 Accuracy: 1.53%, Sample count: 3270
-# Class 184 Accuracy: 3.94%, Sample count: 1803
-# Class 59 Accuracy: 6.19%, Sample count: 15883
-# Class 176 Accuracy: 6.98%, Sample count: 2035
-# Class 82 Accuracy: 9.43%, Sample count: 9913
-# Class 199 Accuracy: 9.95%, Sample count: 1547
-# Class 94 Accuracy: 11.16%, Sample count: 7501
-# Class 169 Accuracy: 13.51%, Sample count: 2295
-# Class 191 Accuracy: 13.68%, Sample count: 1659
-# Class 162 Accuracy: 13.96%, Sample count: 2593
-# Class 189 Accuracy: 14.26%, Sample count: 1704
-# Class 134 Accuracy: 14.46%, Sample count: 3533
-# Class 133 Accuracy: 14.71%, Sample count: 3636
-# Class 180 Accuracy: 15.06%, Sample count: 1945
-# Class 130 Accuracy: 16.23%, Sample count: 3906
-# Class 118 Accuracy: 17.71%, Sample count: 5189
-# Class 109 Accuracy: 18.01%, Sample count: 6495
-# Class 57 Accuracy: 18.02%, Sample count: 16266
-# Class 155 Accuracy: 18.14%, Sample count: 2751
-# Class 119 Accuracy: 18.33%, Sample count: 5029
-# Class 137 Accuracy: 18.59%, Sample count: 3469
-# Class 183 Accuracy: 18.76%, Sample count: 1807
+    class_balanced_partition(xp_dir, "train")
+    # Class 193 Accuracy: 0.00%, Sample count: 1631
+    # Class 179 Accuracy: 0.05%, Sample count: 2000
+    # Class 140 Accuracy: 1.53%, Sample count: 3270
+    # Class 184 Accuracy: 3.94%, Sample count: 1803
+    # Class 59 Accuracy: 6.19%, Sample count: 15883
+    # Class 176 Accuracy: 6.98%, Sample count: 2035
+    # Class 82 Accuracy: 9.43%, Sample count: 9913
+    # Class 199 Accuracy: 9.95%, Sample count: 1547
+    # Class 94 Accuracy: 11.16%, Sample count: 7501
+    # Class 169 Accuracy: 13.51%, Sample count: 2295
+    # Class 191 Accuracy: 13.68%, Sample count: 1659
+    # Class 162 Accuracy: 13.96%, Sample count: 2593
+    # Class 189 Accuracy: 14.26%, Sample count: 1704
+    # Class 134 Accuracy: 14.46%, Sample count: 3533
+    # Class 133 Accuracy: 14.71%, Sample count: 3636
+    # Class 180 Accuracy: 15.06%, Sample count: 1945
+    # Class 130 Accuracy: 16.23%, Sample count: 3906
+    # Class 118 Accuracy: 17.71%, Sample count: 5189
+    # Class 109 Accuracy: 18.01%, Sample count: 6495
+    # Class 57 Accuracy: 18.02%, Sample count: 16266
+    # Class 155 Accuracy: 18.14%, Sample count: 2751
+    # Class 119 Accuracy: 18.33%, Sample count: 5029
+    # Class 137 Accuracy: 18.59%, Sample count: 3469
+    # Class 183 Accuracy: 18.76%, Sample count: 1807

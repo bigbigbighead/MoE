@@ -1,11 +1,101 @@
 import os
 import torch
 
-from utils.data_loading import get_loaders
+from utils.data_loading import get_loaders, import_data
 from utils.model_loading import load_model
 import utils.push as push
 from utils.results_export import export_results
+from infer import load_model_parameters, test_model
 import utils.train_and_test as tnt
+
+
+def train_LProto_FC(
+        configuration,
+        model,
+        epoch_update,
+        xp_dir,
+        log=print,
+):
+    # Load dataset
+    class_balanced_X_train, class_balanced_y_train, X_validation, y_validation, X_test, y_test = import_data(
+        "AppClassNet/top200_class_balanced", xp_dir, val_split=configuration["validation_split"]
+    )
+    loader_train, loader_validation, loader_test = get_loaders(
+        class_balanced_X_train,
+        class_balanced_y_train,
+        X_validation,
+        y_validation,
+        X_test,
+        y_test,
+        batch_size=configuration["batch_size"],
+        shuffle=True,
+        log=log,
+    )
+
+    warm_optimizer_specs = [
+        {
+            "params": model.prototype_vectors,
+            "lr": float(configuration["lrs"]["prototype_vectors"]),
+        }
+    ]
+    last_layer_optimizer_specs = [
+        {
+            "params": model.last_layer.parameters(),
+            "lr": float(configuration["lrs"]["last_layer_optimizer_lr"]),
+        }
+    ]
+    warm_optimizer = torch.optim.Adam(warm_optimizer_specs)
+    last_layer_optimizer = torch.optim.Adam(last_layer_optimizer_specs)
+    cRT_epoch = 100
+    model_multi = torch.nn.DataParallel(model)
+    test_model(model_multi, loader_test, xp_dir)
+    log("Traning FC:")
+    # Train LProto and FC for 100 epoch
+    for epoch in range(1, cRT_epoch + 1):
+        log("epoch: \t{0}".format(epoch + epoch_update))
+        tnt.FC_only(model_multi, print)
+        # accu_train, accu_validation = tnt.train(
+        #     model=model_multi,
+        #     loader_train=loader_train,
+        #     loader_validation=loader_validation,
+        #     optimizer=warm_optimizer,
+        #     coefs=configuration["coefs_list"],
+        #     epoch=epoch,
+        #     epoch_update=epoch_update,
+        #     xp_dir=xp_dir,
+        #     phase="Training",
+        #     log=log,
+        # )
+        accu_train, accu_validation = tnt.train(
+            model=model_multi,
+            loader_train=loader_train,
+            loader_validation=loader_validation,
+            optimizer=last_layer_optimizer,
+            coefs=configuration["coefs_list"],
+            epoch=epoch,
+            epoch_update=epoch_update,
+            xp_dir=xp_dir,
+            phase="Push",
+            log=log,
+        )
+        accu_test, _ = tnt.test(
+            model=model_multi,
+            loader_test=loader_test,
+            coefs=configuration["coefs_list"],
+            epoch=epoch,
+            epoch_update=epoch_update,
+            xp_dir=xp_dir,
+            phase="Training",
+            log=log,
+        )
+        torch.save(
+            obj=model,
+            f=os.path.join(
+                xp_dir, "param/",
+                (configuration["model_name"] + "_{0:.2f}.pth").format(accu_test * 100),
+            ),
+        )
+    return False
 
 
 def train_model_with_prototypes(
@@ -202,6 +292,7 @@ def train_model_with_prototypes(
                         ),
                     )
 
+    change = train_LProto_FC(configuration, model, epoch_update, xp_dir, log)
     return (
         change,
         prototype_shape,
@@ -372,6 +463,9 @@ def train_update(
         size=[X_train.shape[2], X_train.shape[3]],
         nbclass=nbclass,
     )
+    checkpoint_name = "74.85"
+    checkpoint_path = os.path.join(xp_dir, "param/", (configuration["model_name"] + "_" + checkpoint_name + ".pth"))
+    model = torch.load(checkpoint_path)
     model = model.to(device)
 
     # Train model

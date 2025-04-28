@@ -10,7 +10,7 @@ from utils.model_training import train_update
 
 if __name__ == "__main__":
     # Load configuration
-    print("This is branch improvement_1")  # new branch test
+    print("This is branch cRT")  # new branch test
     print("test for remote file ")
     print("test for AutoDL")
     print(torch.cuda.is_available())
@@ -49,12 +49,13 @@ if __name__ == "__main__":
         configuration["dataset"], xp_dir, val_split=configuration["validation_split"]
     )
     print("X_train.shape:", X_train.shape)
-    dir = "./data/AppClassNet/easy24/"
-    train_x = np.load(os.path.join(dir, "train_x.npy"))
-    print("train_x.shape:", train_x.shape)
+    # dir = "./data/AppClassNet/easy24/"
+    # train_x = np.load(os.path.join(dir, "train_x.npy"))
+    # print("train_x.shape:", train_x.shape)
+
     # Initial values
     change = True
-    epoch_update = 0
+    epoch_update = 1000
     nbclass = len(np.unique(y_train))
     num_prototypes = nbclass * configuration["prototypes"]
     prototype_shape = (
@@ -69,7 +70,6 @@ if __name__ == "__main__":
     num_prototypes_per_class = {}
     for i in range(nbclass):
         num_prototypes_per_class[i] = [i]
-
     # Train the model
     while change:
         (

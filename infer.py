@@ -3,6 +3,7 @@ import yaml
 import os
 import numpy as np
 import torch
+import torch.nn.functional as F  # 添加这一行
 import time
 import csv
 import matplotlib.pyplot as plt
@@ -10,6 +11,54 @@ import utils.train_and_test
 from utils.data_loading import import_data, get_loaders
 from utils.model_loading import load_model
 from sklearn.metrics import confusion_matrix
+from utils.model_profile import analyze_model_flops, analyze_prototype_flops, profile_model_execution
+
+
+def analyze_model_computation(model, loader_test, xp_dir):
+    """
+    分析模型计算复杂度和性能特征
+    """
+    # 分析模型总FLOPS
+    input_shape = next(iter(loader_test))[0].shape
+    total_flops, per_layer_flops = analyze_model_flops(model, input_shape)
+    print("\n每层FLOPS详细信息:")
+    for module_name, flops in per_layer_flops.items():
+        print(f"{module_name}: {flops / 1e6:.2f}M FLOPS")
+    # 分析各部分FLOPS
+    features_flops, prototype_flops, classifier_flops = analyze_prototype_flops(model, input_shape)
+
+    # 分析执行时间与FLOPS的关系
+    profile_results = profile_model_execution(model, loader_test)
+
+    # 输出结果
+    results = (
+        f"模型计算复杂度分析:\n"
+        f"总FLOPS: {total_flops / 1e6:.2f}M\n"
+        f"特征提取FLOPS: {features_flops / 1e6:.2f}M ({features_flops / total_flops * 100:.2f}%)\n"
+        f"原型层FLOPS: {prototype_flops / 1e6:.2f}M ({prototype_flops / total_flops * 100:.2f}%)\n"
+        f"分类层FLOPS: {classifier_flops / 1e6:.2f}M ({classifier_flops / total_flops * 100:.2f}%)\n\n"
+        f"执行时间分析 (ms/样本):\n"
+        f"总时间: {profile_results['时间(ms/样本)']['总时间']:.4f}\n"
+        f"特征提取时间: {profile_results['时间(ms/样本)']['特征提取']:.4f} "
+        f"({profile_results['每部分占比']['特征提取时间占比']:.2f}%)\n"
+        f"原型层时间: {profile_results['时间(ms/样本)']['原型层计算']:.4f} "
+        f"({profile_results['每部分占比']['原型层时间占比']:.2f}%)\n"
+        f"分类层时间: {profile_results['时间(ms/样本)']['分类层']:.4f} "
+        f"({profile_results['每部分占比']['分类层时间占比']:.2f}%)\n\n"
+        f"计算效率 (FLOPS/ms):\n"
+        f"特征提取: {profile_results['FLOPS/ms']['特征提取'] / 1e6:.2f}M\n"
+        f"原型层: {profile_results['FLOPS/ms']['原型层计算'] / 1e6:.2f}M\n"
+        f"分类层: {profile_results['FLOPS/ms']['分类层'] / 1e6:.2f}M\n"
+        f"整体模型: {profile_results['FLOPS/ms']['总计'] / 1e6:.2f}M\n"
+    )
+
+    print(results)
+
+    # 保存结果到文件
+    with open(os.path.join(xp_dir, "model_computation_profile.log"), "w") as f:
+        f.write(results)
+
+    return profile_results
 
 
 def load_model_parameters():
@@ -78,7 +127,7 @@ def load_model_parameters():
     #         (configuration["model_name"] + "_{0:.2f}.pth").format(accu_test * 100),
     #     ),
     # )
-    checkpoint_name = "88.21"
+    checkpoint_name = "65.50"
     checkpoint_path = os.path.join(xp_dir, "param/", (configuration["model_name"] + "_" + checkpoint_name + ".pth"))
     # checkpoint = torch.load(checkpoint_path, device)
     model = torch.load(checkpoint_path)
@@ -157,10 +206,12 @@ def save_data(class_sample_count, class_correct_count, xp_dir, class_accuracy_da
                       for class_id in class_sample_count}
     file_path = os.path.join(xp_dir, class_accuracy_data)
     # 将数据写入 CSV 文件
+    sorted_class_accuracy = sorted(class_sample_count.keys())  # 排序，按class_id从小到大
+
     with open(file_path, mode="w", newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["class_id", "accuracy", "sample_count"])  # 写入列标题
-        for class_id in class_sample_count:
+        for class_id in sorted_class_accuracy:
             accuracy = class_accuracy[class_id]
             sample_count = class_sample_count[class_id]
             writer.writerow([class_id, accuracy, sample_count])  # 写入每一行数据
@@ -402,6 +453,168 @@ def detailed_inference_test(model, lodaer_train, loader_test, xp_dir=None, class
     return n_correct / n_examples, total_time, cm
 
 
+def test_model_prototype_layer(model, loader_test, xp_dir, num_samples=None):
+    """
+    测试原型层的计算时间和整体模型推理时间
+
+    Parameters
+    ----------
+    model: 模型对象
+    loader_test: 测试数据加载器
+    xp_dir: 结果保存路径
+    num_samples: 测试样本数量，默认为None时测试全部
+    """
+    model.eval()
+    device = next(model.parameters()).device
+
+    # 用于记录时间的变量
+    total_samples = 0
+    prototype_layer_time = 0
+    full_model_time = 0
+
+    with torch.no_grad():
+        for sample, label in loader_test:
+            input = sample.to(device)
+            batch_size = input.size(0)
+            total_samples += batch_size
+
+            # 1. 测量整个模型的推理时间
+            start_time = time.time()
+            output, _ = model(input)
+            torch.cuda.synchronize()  # 确保GPU操作完成
+            full_model_time += time.time() - start_time
+
+            # 2. 测量原型层的时间
+            # 先获取特征
+            features = model.features(input)
+            start_time = time.time()
+            # 计算原型距离
+            distances = model._l2_convolution(features)
+            # 获取最小距离
+            min_distances = -F.max_pool2d(
+                -distances, kernel_size=(distances.size()[2], distances.size()[3])
+            )
+            min_distances = min_distances.view(-1, model.num_prototypes)
+            # 距离转换为激活值
+            prototype_activations = model.distance_2_similarity(min_distances)
+            torch.cuda.synchronize()  # 确保GPU操作完成
+            prototype_layer_time += time.time() - start_time
+
+            if num_samples and total_samples >= num_samples:
+                break
+
+    # 计算每个样本的平均时间
+    avg_prototype_time = prototype_layer_time / total_samples
+    avg_full_model_time = full_model_time / total_samples
+    prototype_percentage = (prototype_layer_time / full_model_time) * 100
+
+    # 输出结果
+    results = (
+        f"性能测试结果 (样本数: {total_samples}):\n"
+        f"整个模型推理时间: {full_model_time:.4f}秒 ({avg_full_model_time * 1e6:.6f}微秒/样本)\n"
+        f"原型层计算时间: {prototype_layer_time:.4f}秒 ({avg_prototype_time * 1e6:.6f}微秒/样本)\n"
+        f"原型层占总推理时间的比例: {prototype_percentage:.2f}%\n"
+        f"推理吞吐量: {total_samples / full_model_time:.2f}样本/秒\n"
+    )
+    print(results)
+
+    # 将结果保存到文件
+    with open(os.path.join(xp_dir, "prototype_layer_performance.log"), "w") as f:
+        f.write(results)
+
+    return {
+        "total_samples": total_samples,
+        "full_model_time": full_model_time,
+        "prototype_layer_time": prototype_layer_time,
+        "avg_full_model_time": avg_full_model_time,
+        "avg_prototype_time": avg_prototype_time,
+        "prototype_percentage": prototype_percentage
+    }
+
+
+def analyze_prototype_layer_steps(model, loader_test, xp_dir, num_samples=None):
+    """
+    详细分析原型层内各计算步骤的时间消耗
+    """
+    model.eval()
+    device = next(model.parameters()).device
+
+    times = {
+        "特征提取": 0,
+        "L2卷积计算": 0,
+        "最小距离提取": 0,
+        "距离转激活": 0,
+        "分类层": 0
+    }
+
+    total_samples = 0
+
+    with torch.no_grad():
+        for sample, _ in loader_test:
+            input = sample.to(device)
+            batch_size = input.size(0)
+            total_samples += batch_size
+
+            # 1. 特征提取时间
+            start_time = time.time()
+            features = model.features(input)
+            torch.cuda.synchronize()
+            times["特征提取"] += time.time() - start_time
+
+            # 2. L2卷积计算时间
+            start_time = time.time()
+            distances = model._l2_convolution(features)
+            torch.cuda.synchronize()
+            times["L2卷积计算"] += time.time() - start_time
+
+            # 3. 最小距离提取时间
+            start_time = time.time()
+            min_distances = -F.max_pool2d(
+                -distances, kernel_size=(distances.size()[2], distances.size()[3])
+            )
+            min_distances = min_distances.view(-1, model.num_prototypes)
+            torch.cuda.synchronize()
+            times["最小距离提取"] += time.time() - start_time
+
+            # 4. 距离转激活时间
+            start_time = time.time()
+            prototype_activations = model.distance_2_similarity(min_distances)
+            torch.cuda.synchronize()
+            times["距离转激活"] += time.time() - start_time
+
+            # 5. 分类层时间
+            start_time = time.time()
+            _ = model.last_layer(prototype_activations)
+            torch.cuda.synchronize()
+            times["分类层"] += time.time() - start_time
+
+            if num_samples and total_samples >= num_samples:
+                break
+
+    # 计算每个样本的平均时间
+    for key in times:
+        times[key] /= total_samples
+
+    # 计算总时间
+    total_time = sum(times.values())
+
+    # 输出结果
+    results = f"原型层各步骤时间分析 (样本数: {total_samples}):\n"
+    results += f"总推理时间: {total_time * 1e6:.6f}微秒/样本\n"
+
+    for key, value in times.items():
+        percentage = (value / total_time) * 100
+        results += f"{key}: {value * 1e6:.6f}微秒/样本 ({percentage:.2f}%)\n"
+
+    print(results)
+
+    # 将结果保存到文件
+    with open(os.path.join(xp_dir, "prototype_layer_steps_analysis.log"), "w") as f:
+        f.write(results)
+
+    return times
+
+
 if __name__ == "__main__":
     class_accuracy_data = "class_accuracy.csv"
     # 加载模型和数据集
@@ -411,7 +624,16 @@ if __name__ == "__main__":
     # test_model(model, loader_test, xp_dir)
 
     # 分析模型测试集上的详细数据
-    detailed_inference_test(model, loader_train, loader_test, xp_dir, class_accuracy_data)
+    # detailed_inference_test(model, loader_train, loader_test, xp_dir, class_accuracy_data)
 
     # 画图展示测试集上的效果
     # show_data(xp_dir, class_accuracy_data)
+
+    # # 测试模型的原型层性能
+    # test_model_prototype_layer(model, loader_test, xp_dir)
+    #
+    # # 分析原型层各步骤的时间消耗  推进这个，比较准
+    # analyze_prototype_layer_steps(model, loader_test, xp_dir)
+
+    # 分析模型计算复杂度
+    analyze_model_computation(model, loader_test, xp_dir)

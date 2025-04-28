@@ -122,7 +122,7 @@ def train_or_test(
                     min_distances * prototypes_of_wrong_class, dim=1
                 ) / torch.sum(prototypes_of_wrong_class, dim=1)
                 avg_separation_cost = torch.mean(avg_separation_cost)
-
+                time_start_l2 = time.time()
                 # Prototypes L2 regularization
                 l21 = model.module.prototype_vectors.norm(p=2)
 
@@ -132,7 +132,8 @@ def train_or_test(
                     l22 = (model.module.last_layer.weight * l2_mask).norm(p=2)
                 else:
                     l22 = model.module.last_layer.weight.norm(p=2)
-
+                time_l2 = time.time - time_start_l2
+                print("******计算L2距离时间：{%f}".format(time_l2))
             else:
                 min_distance, _ = torch.min(min_distances, dim=2)
                 cluster_cost = torch.mean(min_distance)
@@ -402,6 +403,29 @@ def warm_only(model, log=print):
         p.requires_grad = True
 
     log("\twarm")
+
+
+def LProto_and_FC(model, log=print):
+    """freeze feature extraction layer
+    only train LProto and FC layer with class-balanced sampling
+    """
+    for p in model.module.features.parameters():
+        p.requires_grad = False
+    model.module.prototype_vectors.requires_grad = True
+    for p in model.module.last_layer.parameters():
+        p.requires_grad = True
+    log("FC only")
+
+
+def FC_only(model, log=print):
+    """freeze feature extraction layer
+    only train LProto and FC layer with class-balanced sampling
+    """
+    for p in model.module.features.parameters():
+        p.requires_grad = False
+    model.module.prototype_vectors.requires_grad = False
+    for p in model.module.last_layer.parameters():
+        p.requires_grad = True
 
 
 def joint(model, log=print):
