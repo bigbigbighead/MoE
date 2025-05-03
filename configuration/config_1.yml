@@ -1,7 +1,7 @@
 {
-  "experiment_run": cRT_FC,
+  "experiment_run": 1,
   "gpu": "1",
-  "model_name": "lexnet",
+  "model_name": "ResNet",
   "dataset": "AppClassNet/top200",
   "validation_split": [ 5,1 ],
   "epochs": 1000,

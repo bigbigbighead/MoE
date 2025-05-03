@@ -10,7 +10,7 @@ from utils.model_training import train_update
 
 if __name__ == "__main__":
     # Load configuration
-    print("This is branch cRT")  # new branch test
+    print("This is branch ResNet")  # new branch test
     print("test for remote file ")
     print("test for AutoDL")
     print(torch.cuda.is_available())
