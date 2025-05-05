@@ -191,6 +191,7 @@ def load_checkpoint(checkpoint_path=None, model=None, optimizer=None):
     return start_epoch, best_val_acc, model, optimizer
 
 
+
 if __name__ == "__main__":
     # 记录训练开始信息和配置信息
     log_message(f"=== 训练开始于 {current_time} ===")
@@ -243,7 +244,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     # 添加继续训练选项
-    RESUME_TRAINING = True  # 可以通过命令行参数或配置文件设置此值
+    RESUME_TRAINING = False  # 可以通过命令行参数或配置文件设置此值
     CHECKPOINT_PATH = None  # 可以指定特定的检查点文件，None表示使用最新的
 
     start_epoch = 0
