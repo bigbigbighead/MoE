@@ -10,10 +10,15 @@ import time
 import datetime
 import glob
 import torch.nn.functional as F
+# 添加多进程支持
+import torch.multiprocessing as mp
+from torch.cuda.amp import autocast, GradScaler
+# 添加预取器
+from torch.utils.data.dataloader import _utils
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/1"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/2"
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -33,22 +38,29 @@ def log_message(message, log_file=LOG_FILE):
     print(message)
 
 
-# 超参数
-BATCH_SIZE = 1024
+# 优化超参数
+BATCH_SIZE = 2048  # 增大batch size利用更多GPU内存
 EPOCHS = 1000
 LEARNING_RATE = 0.001
 NUM_CLASSES = 200  # AppClassNet 类别数
 NUM_EXPERTS = 3  # MoE专家头数量
 ROUTING_TYPE = 'softmax'  # 路由类型: 'softmax' 或 'hard'
+NUM_WORKERS = 12  # 增加同时协作进程数量
+PIN_MEMORY = True  # 确保启用pin_memory
+PREFETCH_FACTOR = 8  # 增加预取因子
 
 # 多样性损失权重
 DIVERSITY_WEIGHT = 0.1  # 多样性损失权重
 LOAD_BALANCING_WEIGHT = 0.01  # 负载均衡损失权重
+SPECIALIZATION_WEIGHT = 0.1  # 专业化损失权重
+
+# 自动混合精度训练配置
+USE_AMP = True  # 启用自动混合精度训练
 
 
-# 加载数据集
+# 修改加载数据集函数，添加内存优化和预处理并行化
 def load_data(split):
-    x = np.load(f"{DATASET_PATH}/{split}_x.npy")
+    x = np.load(f"{DATASET_PATH}/{split}_x.npy", mmap_mode='r')  # 使用内存映射加载大型数据
     y = np.load(f"{DATASET_PATH}/{split}_y.npy")
 
     # 检查并打印数据形状，以便调试
@@ -90,6 +102,7 @@ def diversity_loss(expert_outputs):
         for j in range(i + 1, num_experts):
             # 计算余弦相似度 [batch]
             similarity = torch.sum(normalized_outputs[:, i] * normalized_outputs[:, j], dim=1)
+            similarity = torch.abs(similarity)
             total_similarity += torch.sum(similarity)
             count += batch_size
 
@@ -100,92 +113,116 @@ def diversity_loss(expert_outputs):
     return mean_similarity
 
 
-# 计算专家负载均衡损失
-def load_balancing_loss(routing_weights):
-    """计算路由权重的负载均衡损失
+# 计算专家专业化损失
+def expert_specialization_loss(routing_weights, labels, num_classes, num_experts):
+    """计算专家专业化损失，鼓励不同专家专注于不同类别
     routing_weights: [batch_size, num_experts]
-    返回: 负载均衡损失
+    labels: [batch_size]
+    num_classes: 类别总数
+    num_experts: 专家数量
+    返回: 专业化损失 (值越小表示专家越专注于特定类别)
     """
-    # 计算每个专家的平均使用率
-    mean_usage = torch.mean(routing_weights, dim=0)  # [num_experts]
+    batch_size = routing_weights.size(0)
 
-    # 理想情况下，每个专家应该被均匀使用
-    uniform_usage = torch.ones_like(mean_usage) / mean_usage.size(0)
+    # 创建类别-专家关联矩阵 [num_classes, num_experts]
+    # 记录每个类别对每个专家的偏好程度
+    # 优化版本 - 使用矩阵运算代替循环
+    class_expert_matrix = torch.zeros(num_classes, num_experts, device=routing_weights.device)
+    class_expert_matrix.index_add_(0, labels, routing_weights)
 
-    # 计算使用率与理想均匀使用之间的差异
-    imbalance = torch.sum((mean_usage - uniform_usage) ** 2)
+    # 归一化
+    class_sums = class_expert_matrix.sum(dim=1, keepdim=True).clamp(min=1e-8)
+    class_expert_matrix = class_expert_matrix / class_sums
 
-    return imbalance
+    # 计算专家间相关性矩阵
+    expert_corr_matrix = torch.mm(class_expert_matrix.t(), class_expert_matrix)
+    # 移除对角线(自相关)
+    mask = 1.0 - torch.eye(num_experts, device=routing_weights.device)
+    return (expert_corr_matrix * mask).sum() / (num_experts * (num_experts - 1))
 
 
-# 训练和验证函数
-def train_one_epoch_moe(model, loader, criterion, optimizer, device):
+# 优化的训练函数，使用自动混合精度
+def train_one_epoch_moe(model, loader, criterion, optimizer, device, scaler=None):
     model.train()
     running_loss = 0.0
     running_cls_loss = 0.0
     running_div_loss = 0.0
-    running_bal_loss = 0.0
+    running_spec_loss = 0.0
     correct = 0
     total = 0
 
     start_time = time.time()  # 开始计时
 
     for inputs, labels in loader:
-        inputs, labels = inputs.to(device), labels.to(device)
+        # 使用non_blocking=True加速CPU->GPU传输
+        inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         total += labels.size(0)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)  # 更快地重置梯度
 
-        # 获取模型输出: combined_logits, routing_weights, stacked_experts, router_logits
-        combined_logits, routing_weights, stacked_experts, _ = model(inputs)
+        # 使用混合精度训练
+        if USE_AMP and scaler is not None:
+            with autocast():
+                # 获取模型输出
+                combined_logits, routing_weights, stacked_experts, _ = model(inputs)
 
-        # 1. 分类损失: 主要任务损失
-        cls_loss = criterion(combined_logits, labels)
+                # 计算损失
+                cls_loss = criterion(combined_logits, labels)
+                div_loss = diversity_loss(stacked_experts)
+                spec_loss = expert_specialization_loss(routing_weights, labels, NUM_CLASSES, model.num_experts)
+                loss = cls_loss + DIVERSITY_WEIGHT * div_loss + SPECIALIZATION_WEIGHT * spec_loss
 
-        # 2. 多样性损失: 确保专家输出的多样性
-        div_loss = diversity_loss(stacked_experts)
+            # 使用scaler进行反向传播和优化
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # 获取模型输出
+            combined_logits, routing_weights, stacked_experts, _ = model(inputs)
 
-        # 3. 负载均衡损失: 确保专家被均匀使用
-        bal_loss = load_balancing_loss(routing_weights)
+            # 计算损失
+            cls_loss = criterion(combined_logits, labels)
+            div_loss = diversity_loss(stacked_experts)
+            spec_loss = expert_specialization_loss(routing_weights, labels, NUM_CLASSES, model.num_experts)
+            loss = cls_loss + DIVERSITY_WEIGHT * div_loss + SPECIALIZATION_WEIGHT * spec_loss
 
-        # 总损失
-        loss = cls_loss + DIVERSITY_WEIGHT * div_loss + LOAD_BALANCING_WEIGHT * bal_loss
-
-        loss.backward()
-        optimizer.step()
+            loss.backward()
+            optimizer.step()
 
         running_loss += loss.item()
         running_cls_loss += cls_loss.item()
         running_div_loss += div_loss.item()
-        running_bal_loss += bal_loss.item()
+        running_spec_loss += spec_loss.item()
 
         # 计算准确率
-        _, predicted = combined_logits.max(1)
-        correct += predicted.eq(labels).sum().item()
+        with torch.no_grad():
+            _, predicted = combined_logits.max(1)
+            correct += predicted.eq(labels).sum().item()
 
     epoch_time = time.time() - start_time
     epoch_loss = running_loss / len(loader)
     epoch_cls_loss = running_cls_loss / len(loader)
     epoch_div_loss = running_div_loss / len(loader)
-    epoch_bal_loss = running_bal_loss / len(loader)
+    epoch_spec_loss = running_spec_loss / len(loader)
     epoch_acc = 100. * correct / total
 
     return {
         'loss': epoch_loss,
         'cls_loss': epoch_cls_loss,
         'div_loss': epoch_div_loss,
-        'bal_loss': epoch_bal_loss,
+        'spec_loss': epoch_spec_loss,
         'acc': epoch_acc,
         'time': epoch_time
     }
 
 
+# 优化的验证函数，添加混合精度支持
 def validate_moe(model, loader, criterion, device):
     model.eval()
     running_loss = 0.0
     running_cls_loss = 0.0
     running_div_loss = 0.0
-    running_bal_loss = 0.0
+    running_spec_loss = 0.0
     correct = 0
     total = 0
 
@@ -193,23 +230,34 @@ def validate_moe(model, loader, criterion, device):
 
     with torch.no_grad():
         for inputs, labels in loader:
-            inputs, labels = inputs.to(device), labels.to(device)
+            inputs, labels = inputs.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             total += labels.size(0)
 
-            # 获取模型输出
-            combined_logits, routing_weights, stacked_experts, _ = model(inputs)
+            # 使用混合精度推理
+            if USE_AMP:
+                with autocast():
+                    # 获取模型输出
+                    combined_logits, routing_weights, stacked_experts, _ = model(inputs)
 
-            # 计算各项损失
-            cls_loss = criterion(combined_logits, labels)
-            div_loss = diversity_loss(stacked_experts)
-            bal_loss = load_balancing_loss(routing_weights)
+                    # 计算各项损失
+                    cls_loss = criterion(combined_logits, labels)
+                    div_loss = diversity_loss(stacked_experts)
+                    spec_loss = expert_specialization_loss(routing_weights, labels, NUM_CLASSES, model.num_experts)
+                    loss = cls_loss + DIVERSITY_WEIGHT * div_loss + SPECIALIZATION_WEIGHT * spec_loss
+            else:
+                # 获取模型输出
+                combined_logits, routing_weights, stacked_experts, _ = model(inputs)
 
-            loss = cls_loss + DIVERSITY_WEIGHT * div_loss + LOAD_BALANCING_WEIGHT * bal_loss
+                # 计算各项损失
+                cls_loss = criterion(combined_logits, labels)
+                div_loss = diversity_loss(stacked_experts)
+                spec_loss = expert_specialization_loss(routing_weights, labels, NUM_CLASSES, model.num_experts)
+                loss = cls_loss + DIVERSITY_WEIGHT * div_loss + SPECIALIZATION_WEIGHT * spec_loss
 
             running_loss += loss.item()
             running_cls_loss += cls_loss.item()
             running_div_loss += div_loss.item()
-            running_bal_loss += bal_loss.item()
+            running_spec_loss += spec_loss.item()
 
             # 计算准确率
             _, predicted = combined_logits.max(1)
@@ -219,14 +267,14 @@ def validate_moe(model, loader, criterion, device):
     epoch_loss = running_loss / len(loader)
     epoch_cls_loss = running_cls_loss / len(loader)
     epoch_div_loss = running_div_loss / len(loader)
-    epoch_bal_loss = running_bal_loss / len(loader)
+    epoch_spec_loss = running_spec_loss / len(loader)
     epoch_acc = 100. * correct / total
 
     return {
         'loss': epoch_loss,
         'cls_loss': epoch_cls_loss,
         'div_loss': epoch_div_loss,
-        'bal_loss': epoch_bal_loss,
+        'spec_loss': epoch_spec_loss,
         'acc': epoch_acc,
         'time': epoch_time
     }
@@ -292,16 +340,34 @@ def load_checkpoint(checkpoint_path=None, model=None, optimizer=None):
 
 
 if __name__ == "__main__":
+    # 设置NUMA绑定和多线程优化
+    if torch.cuda.is_available():
+        # 启用CUDA性能优化
+        torch.backends.cudnn.benchmark = True
+        # 如果输入尺寸固定，可以启用cudnn.deterministic以获得更好性能
+        # torch.backends.cudnn.deterministic = True
+
+    # 如果使用CPU，则设置OpenMP线程数
+    if not torch.cuda.is_available():
+        torch.set_num_threads(NUM_WORKERS)  # 设置适当的线程数
+
     # 记录训练开始信息和配置信息
     log_message(f"=== 训练开始于 {current_time} ===")
     log_message(f"BatchSize: {BATCH_SIZE}, Learning Rate: {LEARNING_RATE}, Epochs: {EPOCHS}")
     log_message(f"数据集路径: {DATASET_PATH}")
     log_message(f"结果保存路径: {RESULTS_PATH}")
     log_message(f"使用设备: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
+    log_message(f"自动混合精度: {USE_AMP}")
+    log_message(f"工作进程数: {NUM_WORKERS}")
     log_message(f"MoE专家头数量: {NUM_EXPERTS}")
     log_message(f"路由类型: {ROUTING_TYPE}")
     log_message(f"多样性损失权重: {DIVERSITY_WEIGHT}")
     log_message(f"负载均衡损失权重: {LOAD_BALANCING_WEIGHT}")
+    log_message(f"专业化损失权重: {SPECIALIZATION_WEIGHT}")
+
+    # 配置数据并行训练，利用多个GPU
+    multi_gpu = torch.cuda.device_count() > 1
+    log_message(f"使用GPU数量: {torch.cuda.device_count()}")
 
     train_x, train_y = load_data("train")
     valid_x, valid_y = load_data("valid")
@@ -310,31 +376,38 @@ if __name__ == "__main__":
     # 打印数据形状，用于调试
     log_message(f"Final shapes - Train: {train_x.shape}, Valid: {valid_x.shape}, Test: {test_x.shape}")
 
+    # 优化数据集加载
+    # 为了减少内存使用，可以考虑自定义Dataset实现按需加载数据
     train_dataset = torch.utils.data.TensorDataset(train_x, train_y)
     val_dataset = torch.utils.data.TensorDataset(valid_x, valid_y)
     test_dataset = torch.utils.data.TensorDataset(test_x, test_y)
 
+    # 使用更多工作线程和更大的预取因子
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=12,
-        pin_memory=True,
-        prefetch_factor=2
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        prefetch_factor=PREFETCH_FACTOR,
+        persistent_workers=True,  # 保持工作进程活跃，减少重启开销
+        drop_last=True  # 丢弃不足一个批次的样本，可能提高训练效率
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=BATCH_SIZE,
+        batch_size=BATCH_SIZE * 2,  # 验证时可以用更大的batch size
         shuffle=False,
-        num_workers=12,
-        pin_memory=True
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        persistent_workers=True
     )
     test_loader = DataLoader(
         test_dataset,
-        batch_size=BATCH_SIZE,
+        batch_size=BATCH_SIZE * 2,
         shuffle=False,
-        num_workers=12,
-        pin_memory=True
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        persistent_workers=True
     )
 
     # 初始化设备
@@ -355,11 +428,24 @@ if __name__ == "__main__":
         input_channels=input_channels,
         input_height=input_height,
         input_width=input_width
-    ).to(device)
+    )
+
+    # 创建混合精度训练的scaler
+    scaler = GradScaler() if USE_AMP else None
+
+    # 如果有多GPU，使用DataParallel
+    if multi_gpu:
+        log_message("启用多GPU并行训练")
+        model = nn.DataParallel(model)
+
+    model.to(device)
 
     # 损失函数和优化器
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
+
+    # 添加学习率调度器
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
 
     # 添加继续训练选项
     RESUME_TRAINING = False
@@ -381,22 +467,25 @@ if __name__ == "__main__":
     # 训练循环
     for epoch in range(start_epoch, EPOCHS):
         # 训练
-        train_metrics = train_one_epoch_moe(model, train_loader, criterion, optimizer, device)
+        train_metrics = train_one_epoch_moe(model, train_loader, criterion, optimizer, device, scaler)
         # 验证
         val_metrics = validate_moe(model, val_loader, criterion, device)
         # 测试
         test_metrics = validate_moe(model, test_loader, criterion, device)
 
+        # 更新学习率
+        scheduler.step(val_metrics['acc'])
+
         # 记录日志
         log_message(f"Epoch {epoch + 1}/{EPOCHS}")
         log_message(f"Train - Loss: {train_metrics['loss']:.4f}, CLS: {train_metrics['cls_loss']:.4f}, "
-                    f"DIV: {train_metrics['div_loss']:.4f}, BAL: {train_metrics['bal_loss']:.4f}, "
+                    f"DIV: {train_metrics['div_loss']:.4f}, SPEC: {train_metrics['spec_loss']:.4f}, "
                     f"Acc: {train_metrics['acc']:.2f}%, Time: {train_metrics['time']:.2f}s")
         log_message(f"Valid - Loss: {val_metrics['loss']:.4f}, CLS: {val_metrics['cls_loss']:.4f}, "
-                    f"DIV: {val_metrics['div_loss']:.4f}, BAL: {val_metrics['bal_loss']:.4f}, "
+                    f"DIV: {val_metrics['div_loss']:.4f}, SPEC: {val_metrics['spec_loss']:.4f}, "
                     f"Acc: {val_metrics['acc']:.2f}%, Time: {val_metrics['time']:.2f}s")
         log_message(f"Test  - Loss: {test_metrics['loss']:.4f}, CLS: {test_metrics['cls_loss']:.4f}, "
-                    f"DIV: {test_metrics['div_loss']:.4f}, BAL: {test_metrics['bal_loss']:.4f}, "
+                    f"DIV: {test_metrics['div_loss']:.4f}, SPEC: {test_metrics['spec_loss']:.4f}, "
                     f"Acc: {test_metrics['acc']:.2f}%, Time: {test_metrics['time']:.2f}s")
         log_message("-" * 50)
 
@@ -411,7 +500,7 @@ if __name__ == "__main__":
                 'val_loss': val_metrics['loss'],
                 'train_loss': train_metrics['loss'],
                 'diversity_weight': DIVERSITY_WEIGHT,
-                'load_balancing_weight': LOAD_BALANCING_WEIGHT,
+                'specialization_weight': SPECIALIZATION_WEIGHT,
                 'num_experts': NUM_EXPERTS
             }
             torch.save(checkpoint, f"{RESULTS_PATH}/param/best_model_{val_metrics['acc']:.2f}.pth")
@@ -427,7 +516,7 @@ if __name__ == "__main__":
                 'val_loss': val_metrics['loss'],
                 'train_loss': train_metrics['loss'],
                 'diversity_weight': DIVERSITY_WEIGHT,
-                'load_balancing_weight': LOAD_BALANCING_WEIGHT,
+                'specialization_weight': SPECIALIZATION_WEIGHT,
                 'num_experts': NUM_EXPERTS
             }
             torch.save(checkpoint, f"{RESULTS_PATH}/param/model_epoch_{epoch + 1}.pth")

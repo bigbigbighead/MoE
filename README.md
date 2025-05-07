@@ -1,36 +1,23 @@
-# LEXNet: A Lightweight, Efficient and Explainable-by-Design Convolutional Neural Network for Internet Traffic Classification
-This repository contains the Python implementation of LEXNet as described in 
-the paper [A Lightweight, Efficient and Explainable-by-Design Convolutional Neural Network for Internet Traffic Classification](https://arxiv.org/pdf/2202.05535).
+# 模型说明
 
-<p align="center">
-<img src="/images/class_prototypes_application1.png" width="50%">
-</p>
+1： 原始MoE-ResNetv1:   分类损失+多样性损失+负载均衡损失
+2： 改进MoE-ResNetv2:  分类损失+多样性损失+专业化损失
 
-## Requirements
-LEXNet has been implemented in Python 3 with the following packages:
-* numpy
-* opencv
-* pandas
-* pytorch with cuda
-* pyyaml
-* scikit-learn
-* scipy
 
-## Usage
-Run `main.py` with the following argument:
 
-* configuration: name of the configuration file (string)
+## MoE-ResNetv2说明
 
-```
-python main.py --config configuration/config.yml
-```
+- 多样性损失：即使处理同样的输入，专家也应该给出不同的"意见"
+- 专业化损失：路由器应该将不同类别的样本分配给不同的专家
 
-## Citation
-```
-@inproceedings{Fauvel23LEXNet,
-  author = {Fauvel, K. and F. Chen and D. Rossi},
-  title = {{A Lightweight, Efficient and Explainable-by-Design Convolutional Neural Network for Internet Traffic Classification}},
-  booktitle = {Proceedings of the 29th ACM SIGKDD International Conference on Knowledge Discovery \& Data Mining},
-  year = {2023}
-}
-```
+使用专业化损失
+
+## 保存结果说明
+
+宿舍电脑：MoE/1:	MoEv1:负载均衡损失
+
+3090-203：
+
+- MoE/1：只试运行，没有训练
+
+- MoE/2：专业化损失，正常训练
