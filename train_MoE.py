@@ -18,7 +18,7 @@ from torch.utils.data.dataloader import _utils
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/2"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/5"
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -44,7 +44,7 @@ EPOCHS = 1000
 LEARNING_RATE = 0.001
 NUM_CLASSES = 200  # AppClassNet 类别数
 NUM_EXPERTS = 3  # MoE专家头数量
-ROUTING_TYPE = 'softmax'  # 路由类型: 'softmax' 或 'hard'
+ROUTING_TYPE = 'hard'  # 路由类型: 'softmax' 或 'hard'
 NUM_WORKERS = 12  # 增加同时协作进程数量
 PIN_MEMORY = True  # 确保启用pin_memory
 PREFETCH_FACTOR = 8  # 增加预取因子
