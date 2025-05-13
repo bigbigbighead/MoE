@@ -251,7 +251,7 @@ class SpecializedExpert(nn.Module):
         """
         super().__init__()
         self.start_class, self.end_class = class_range
-        self.num_classes = self.end_class - self.start_class
+        self.num_classes = self.end_class - self.start_class + 1
 
         self.classifier = nn.Sequential(
             nn.Linear(feat_dim, 256),

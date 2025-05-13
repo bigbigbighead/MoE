@@ -1,16 +1,14 @@
 import os
 import time
 import datetime
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset, Subset, TensorDataset
-from torchvision import datasets, transforms
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import autocast, GradScaler
-
 from models.MoE import MoE4Model
+
+from utils.data_loading_mine import log_message, load_data, get_dataloaders
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
@@ -25,15 +23,6 @@ os.makedirs(f"{RESULTS_PATH}/logs", exist_ok=True)
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 
-
-# 日志记录函数
-def log_message(message, log_file=LOG_FILE):
-    """记录消息到日志文件"""
-    with open(log_file, 'a') as f:
-        f.write(f"{message}\n")
-    print(message)
-
-
 # 优化超参数
 BATCH_SIZE = 2048  # 批次大小
 EPOCHS_STAGE1 = 300  # 第一阶段训练轮数
@@ -43,79 +32,12 @@ LEARNING_RATE_STAGE2 = 0.0001  # 第二阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
 NUM_EXPERTS = 3  # MoE专家头数量
 ROUTING_TYPE = 'hard'  # 路由类型: 'softmax' 或 'hard'
-NUM_WORKERS = 12  # 数据加载的worker数量
+NUM_WORKERS = 8  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
 PREFETCH_FACTOR = 8  # 增加预取因子
 
 # 自动混合精度训练配置
 USE_AMP = True  # 启用自动混合精度训练
-
-
-# 数据加载函数
-def load_data(split, dataset_path=DATASET_PATH):
-    """加载数据集"""
-    x = np.load(f"{dataset_path}/{split}_x.npy", mmap_mode='r')
-    y = np.load(f"{dataset_path}/{split}_y.npy")
-
-    message = f"{split} data shape before processing: {x.shape}"
-    log_message(message)
-
-    # 根据输入数据的实际形状调整
-    if len(x.shape) == 4:  # 如果已经是4D张量 [batch, channels, height, width]
-        x = torch.tensor(x, dtype=torch.float32)
-    elif len(x.shape) == 3:  # 如果是3D张量 [batch, height, width]
-        x = torch.tensor(x, dtype=torch.float32).unsqueeze(1)  # 添加通道维度
-    else:
-        # 如果是2D张量 [batch, features]，需要重塑为适合CNN的形状
-        x = torch.tensor(x, dtype=torch.float32).reshape(-1, 1, 1, x.shape[1])
-
-    log_message(f"{split} data shape after processing: {x.shape}")
-    y = torch.tensor(y, dtype=torch.long)
-    return x, y
-
-
-# 数据加载器
-def get_dataloaders():
-    # 加载数据集
-    train_x, train_y = load_data("train")
-    val_x, val_y = load_data("valid")
-    test_x, test_y = load_data("test")
-
-    # 创建按专家类别范围分割的数据集
-    class_ranges = [(0, 99), (100, 149), (150, 199)]
-    train_subsets = []
-
-    # 将训练数据分割为每个专家负责的子集
-    for start_class, end_class in class_ranges:
-        indices = torch.where((train_y >= start_class) & (train_y <= end_class - 1))[0]
-        subset_x = train_x[indices]
-        subset_y = train_y[indices] - start_class  # 调整标签使其从0开始
-        train_subsets.append(TensorDataset(subset_x, subset_y))
-
-    # 创建数据加载器
-    train_loaders = []
-    for subset in train_subsets:
-        train_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE, shuffle=True,
-                                        num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                                        prefetch_factor=PREFETCH_FACTOR, persistent_workers=True))
-
-    # 完整数据集的加载器
-    full_train_dataset = TensorDataset(train_x, train_y)
-    full_train_loader = DataLoader(full_train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                                   num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                                   prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
-
-    val_dataset = TensorDataset(val_x, val_y)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
-                            num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                            prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
-
-    test_dataset = TensorDataset(test_x, test_y)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
-                             num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                             prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
-
-    return train_loaders, full_train_loader, val_loader, test_loader
 
 
 # 第一阶段训练：单独训练每个专家
@@ -218,22 +140,27 @@ def train_stage1(model, train_loaders, val_loader, test_loader, device):
         #     f"第一阶段训练 - Epoch {epoch + 1}/{EPOCHS_STAGE1} 完成, 总训练耗时: {total_epoch_train_time:.2f}s, 总耗时: {epoch_time_taken:.2f}s")
 
         # 每个epoch结束后验证
-        if (epoch + 1) % 5 == 0 or (epoch + 1) == EPOCHS_STAGE1:
-            # 验证集评估
-            val_results = validate_experts(model, val_loader, criterion, writer, epoch, device, "val")
-            log_message(f"  验证集评估结果:")
-            for expert_idx in range(len(model.experts)):
-                if expert_idx in val_results['expert_accuracies']:
-                    log_message(f"    \t专家{expert_idx} - 验证损失: {val_results['expert_losses'][expert_idx]:.4f}, "
-                                f"准确率: {val_results['expert_accuracies'][expert_idx]:.4f}")
+        # 验证集评估
+        valid_start_time = time.time()
+        val_results = validate_experts(model, val_loader, criterion, writer, epoch, device, "val")
+        valid_end_time = time.time()
+        log_message(f"  验证集评估结果:")
+        for expert_idx in range(len(model.experts)):
+            if expert_idx in val_results['expert_accuracies']:
+                log_message(f"    \t专家{expert_idx} - 验证损失: {val_results['expert_losses'][expert_idx]:.4f}, "
+                            f"准确率: {val_results['expert_accuracies'][expert_idx]:.4f}")
+        log_message(f"  \t验证集评估耗时: {valid_end_time - valid_start_time:.2f}s")
 
-            # 测试集评估
-            test_results = validate_experts(model, test_loader, criterion, writer, epoch, device, "test")
-            log_message(f"  测试集评估结果:")
-            for expert_idx in range(len(model.experts)):
-                if expert_idx in test_results['expert_accuracies']:
-                    log_message(f"    \t专家{expert_idx} - 测试损失: {test_results['expert_losses'][expert_idx]:.4f}, "
-                                f"准确率: {test_results['expert_accuracies'][expert_idx]:.4f}")
+        # 测试集评估
+        test_start_time = time.time()
+        test_results = validate_experts(model, test_loader, criterion, writer, epoch, device, "test")
+        test_end_time = time.time()
+        log_message(f"  测试集评估结果:")
+        for expert_idx in range(len(model.experts)):
+            if expert_idx in test_results['expert_accuracies']:
+                log_message(f"    \t专家{expert_idx} - 测试损失: {test_results['expert_losses'][expert_idx]:.4f}, "
+                            f"准确率: {test_results['expert_accuracies'][expert_idx]:.4f}")
+        log_message(f"  \t测试集评估耗时: {test_end_time - test_start_time:.2f}s")
 
         # 保存阶段性检查点
         if (epoch + 1) % 10 == 0 or (epoch + 1) == EPOCHS_STAGE1:
@@ -273,7 +200,7 @@ def validate_experts(model, data_loader, criterion, writer, epoch, device, split
                 start_class, end_class = model.class_ranges[expert_idx]
 
                 # 只评估该专家负责的类别范围内的样本
-                mask = (targets >= start_class) & (targets <= end_class - 1)
+                mask = (targets >= start_class) & (targets <= end_class)
 
                 if mask.sum() > 0:
                     expert_inputs = features[mask]
@@ -515,7 +442,7 @@ def validate_full_model(model, data_loader, criterion, device, split="val"):
 
             # 计算每个类别区间的准确率
             for i, (start, end) in enumerate(model.class_ranges):
-                mask = (targets >= start) & (targets <= end - 1)
+                mask = (targets >= start) & (targets <= end)
                 if mask.sum() > 0:
                     class_total[i] += mask.sum().item()
                     class_correct[i] += predicted[mask].eq(targets[mask]).sum().item()
@@ -578,7 +505,7 @@ if __name__ == "__main__":
     # 创建模型
     model = MoE4Model(
         total_classes=NUM_CLASSES,
-        class_ranges=[(0, 100), (100, 150), (150, 200)],
+        class_ranges=[(0, 99), (100, 149), (150, 199)],
         routing_type=ROUTING_TYPE,
         input_channels=input_channels,
         input_height=input_height,
