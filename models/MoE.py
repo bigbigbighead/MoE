@@ -235,8 +235,12 @@ class MoE4Router(nn.Module):
         else:
             # 硬路由：每个样本只选择概率最高的专家
             max_indices = router_logits.argmax(dim=1)
-            routing_weights = F.one_hot(max_indices, num_classes=router_logits.size(1)).float()
+            # 修改这部分，使用带有梯度的伪硬路由方式
+            mask = F.one_hot(max_indices, num_classes=router_logits.size(1)).float()
 
+            # 使用STE (Straight-Through Estimator) 技术保持梯度流
+            # 前向传播使用硬路由，反向传播使用原始logits的梯度
+            routing_weights = mask.detach() + router_logits - router_logits.detach()
         return routing_weights, router_logits
 
 
@@ -341,7 +345,7 @@ class MoE4Model(nn.Module):
             weighted_logits = expert_logits * routing_weights[:, i].unsqueeze(1)
 
             # 填充到对应的类别位置
-            final_logits[:, start_idx:end_idx] = weighted_logits
+            final_logits[:, start_idx:end_idx + 1] = weighted_logits
 
         return final_logits
 

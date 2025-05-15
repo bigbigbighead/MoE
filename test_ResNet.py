@@ -13,6 +13,14 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from models.ResNet import resnet18, resnet34
 
+DATASET_PATH = "./data/AppClassNet/top200"
+MODEL_TYPE = "resnet18"  # 可选择 "resnet18" 或 "resnet34"
+RESULTS_PATH = f"./results/AppClassNet/top200/ResNet/1"
+OUTPUT_DIR = f"{RESULTS_PATH}/analysis"
+NUM_CLASSES = 200
+BATCH_SIZE = 2048
+NUM_WORKERS = 12
+
 
 def load_data(split, dataset_path):
     """加载数据集"""
@@ -360,13 +368,6 @@ def compute_class_similarity(class_features, save_path="class_similarity.png"):
 
 def main():
     # 配置参数
-    DATASET_PATH = "./data/AppClassNet/top200"
-    MODEL_TYPE = "resnet18"  # 可选择 "resnet18" 或 "resnet34"
-    RESULTS_PATH = f"./results/AppClassNet/top200/ResNet/1"
-    OUTPUT_DIR = f"{RESULTS_PATH}/analysis"
-    NUM_CLASSES = 200
-    BATCH_SIZE = 2048
-    NUM_WORKERS = 12
 
     # 确保输出目录存在
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -404,7 +405,7 @@ def main():
     train_counts = get_set_info(train_loader)
 
     # 加载模型
-    model = load_model_from_checkpoint(MODEL_TYPE, None, NUM_CLASSES, device, RESULTS_PATH)
+    model = load_model_from_checkpoint(MODEL_TYPE, RESULTS_PATH, NUM_CLASSES, device, RESULTS_PATH)
 
     # 评估模型
     print("Evaluating model on test set...")

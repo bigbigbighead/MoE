@@ -13,6 +13,16 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from models.MoE import MoEResNet18
 
+# 配置参数
+DATASET_PATH = "./data/AppClassNet/top200"
+CHECKPOINT_PATH = "./results/AppClassNet/top200/MoE/2"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/2"
+OUTPUT_DIR = f"{RESULTS_PATH}/analysis"
+NUM_CLASSES = 200
+NUM_EXPERTS = 3
+BATCH_SIZE = 2048
+NUM_WORKERS = 12
+
 
 def load_data(split, dataset_path):
     """加载数据集"""
@@ -515,15 +525,6 @@ def get_set_info(data_loader):
 
 
 def main():
-    # 配置参数
-    DATASET_PATH = "./data/AppClassNet/top200"
-    RESULTS_PATH = "./results/AppClassNet/top200/MoE/2"
-    OUTPUT_DIR = f"{RESULTS_PATH}/analysis"
-    NUM_CLASSES = 200
-    NUM_EXPERTS = 3
-    BATCH_SIZE = 2048
-    NUM_WORKERS = 12
-
     # 确保输出目录存在
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -570,7 +571,7 @@ def main():
     train_counts = get_set_info(train_loader)
 
     # 加载模型
-    model = load_model_from_checkpoint(None, NUM_CLASSES, NUM_EXPERTS, device)
+    model = load_model_from_checkpoint(CHECKPOINT_PATH, NUM_CLASSES, NUM_EXPERTS, device)
 
     # 评估模型
     print("Evaluating model on test set...")

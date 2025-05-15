@@ -4,15 +4,19 @@ import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import glob
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import autocast, GradScaler
 from models.MoE import MoE4Model
+from models.ResNet import resnet18
 
 from utils.data_loading_mine import log_message, load_data, get_dataloaders
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
 RESULTS_PATH = "./results/AppClassNet/top200/MoE/4"
+# 预训练模型路径
+PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -37,11 +41,133 @@ PIN_MEMORY = True  # 确保启用pin_memory
 PREFETCH_FACTOR = 8  # 增加预取因子
 
 # 自动混合精度训练配置
-USE_AMP = True  # 启用自动混合精度训练
+USE_AMP = True  # 启��自动混合精度训练
+
+
+# 查找并加载模型检查点
+def load_checkpoint(checkpoint_path=None, model=None, optimizer=None, stage="stage1"):
+    """加载模型检查点以继续训练"""
+    start_epoch = 0
+    best_val_acc = 0.0
+
+    if checkpoint_path is None:
+        # 寻找最新的epoch检查点
+        checkpoint_files = glob.glob(f"{RESULTS_PATH}/param/{stage}_epoch*.pth")
+        if checkpoint_files:
+            # 提取轮次数并找到最大的
+            epochs = [int(f.split('epoch')[-1].split('.')[0]) for f in checkpoint_files]
+            max_epoch = max(epochs)
+            checkpoint_path = f"{RESULTS_PATH}/param/{stage}_epoch{max_epoch}.pth"
+            start_epoch = max_epoch  # 从下一个轮次开始
+        else:
+            # 如果没有epoch检查点，寻找最终模型检查点
+            final_checkpoint = f"{RESULTS_PATH}/param/{stage}_final.pth"
+            if os.path.isfile(final_checkpoint):
+                checkpoint_path = final_checkpoint
+            else:
+                log_message(f"未找到{stage}阶段可用的检查点，将从头开始训练")
+                return start_epoch, best_val_acc, model, optimizer
+
+    # 检查文件是否存在
+    if not os.path.isfile(checkpoint_path):
+        log_message(f"检查点 {checkpoint_path} 不存在，将从头开始训练")
+        return start_epoch, best_val_acc, model, optimizer
+
+    # 加载检查点
+    log_message(f"加载检查点: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path)
+
+    # 检查检查点类型
+    if isinstance(checkpoint, dict):
+        # 完整检查点
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+
+            # 处理优化器 - 第一阶段有多个优化器
+            if stage == "stage1" and 'optimizers' in checkpoint and optimizer is not None:
+                # 假设传入的optimizer是一个列表
+                for i, opt_state in enumerate(checkpoint['optimizers']):
+                    if i < len(optimizer):
+                        optimizer[i].load_state_dict(opt_state)
+            elif 'optimizer_state_dict' in checkpoint and optimizer is not None:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            if 'epoch' in checkpoint:
+                start_epoch = checkpoint['epoch'] + 1  # 从下一个epoch开始
+            if 'val_accuracy' in checkpoint:
+                best_val_acc = checkpoint['val_accuracy']
+            elif 'best_val_acc' in checkpoint:
+                best_val_acc = checkpoint['best_val_acc']
+        else:
+            # 仅模型参数
+            model.load_state_dict(checkpoint)
+    else:
+        # 仅模型参数
+        model.load_state_dict(checkpoint)
+
+    log_message(
+        f"成功加载第{stage}阶段检查点，从第 {start_epoch} 轮开始继续训练，当前最佳验证准确率: {best_val_acc:.2f}%")
+    return start_epoch, best_val_acc, model, optimizer
+
+
+# 加载预训练ResNet18模型并迁移参数到MoE模型
+def load_pretrained_weights(moe_model, pretrained_path):
+    """
+    从预训练ResNet18模型加载权重到MoE模型的backbone部��
+    
+    Args:
+        moe_model: MoE4Model实例
+        pretrained_path: 预训练ResNet18模型的路径
+    
+    Returns:
+        加载了预训练权重的MoE模型
+    """
+    if not os.path.exists(pretrained_path):
+        log_message(f"预训练模型 {pretrained_path} 不存在，将使用随机初始化的权重")
+        return moe_model
+
+    log_message(f"从 {pretrained_path} 加载预训练ResNet18权重")
+
+    # 加载预训练ResNet18模型
+    pretrained_dict = torch.load(pretrained_path)
+
+    # 检查加载的对象类型
+    if isinstance(pretrained_dict, dict) and 'model_state_dict' in pretrained_dict:
+        pretrained_dict = pretrained_dict['model_state_dict']
+
+    # 创建一个新字典，只包含backbone相关的参数
+    backbone_dict = {}
+
+    # 遍历预训练模型的所有参数
+    for k, v in pretrained_dict.items():
+        # 将ResNet参数映射到MoE backbone
+        if k.startswith('conv1') or k.startswith('bn1') or k.startswith('layer'):
+            # 添加backbone前缀以匹配MoE模型的键名
+            backbone_key = f'backbone.{k}'
+            backbone_dict[backbone_key] = v
+
+    # 仅加载匹配的参数
+    moe_state_dict = moe_model.state_dict()
+
+    # 检查参数形状匹配
+    for k, v in backbone_dict.items():
+        if k in moe_state_dict and moe_state_dict[k].shape == v.shape:
+            moe_state_dict[k] = v
+        else:
+            if k in moe_state_dict:
+                log_message(f"形状不匹配: {k}, 预训练: {v.shape}, MoE: {moe_state_dict[k].shape}")
+            else:
+                log_message(f"MoE模型中不存在键: {k}")
+
+    # 加载修改后的状态字典
+    moe_model.load_state_dict(moe_state_dict)
+    log_message("预训练权重成功加载到MoE模型backbone")
+
+    return moe_model
 
 
 # 第一阶段训练：单独训练每个专家
-def train_stage1(model, train_loaders, val_loader, test_loader, device):
+def train_stage1(model, train_loaders, val_loader, test_loader, device, resume_training=False):
     """
     第一阶段训练：分别训练每个专家
     """
@@ -51,21 +177,32 @@ def train_stage1(model, train_loaders, val_loader, test_loader, device):
     # 保存初始模型
     initial_state = model.state_dict()
 
+    # 冻结backbone参数
+    for param in model.backbone.parameters():
+        param.requires_grad = False
+
+    log_message("已冻结backbone参数，仅训练专家分类器")
+
     # 为每个专家创建优化器
     optimizers = []
     for i in range(len(model.experts)):
-        # 只优化backbone和当前专家的参数
-        params = list(model.backbone.parameters()) + list(model.experts[i].parameters())
-        optimizer = optim.Adam(params, lr=LEARNING_RATE_STAGE1)
+        # 只优化当前专家的参数
+        optimizer = optim.Adam(model.experts[i].parameters(), lr=LEARNING_RATE_STAGE1)
         optimizers.append(optimizer)
 
     # 创建混合精度训练的scaler
     scaler = GradScaler() if USE_AMP else None
 
+    # 添加恢复训练功能
+    start_epoch = 0
+    best_val_acc = 0.0
+    if resume_training:
+        start_epoch, best_val_acc, model, optimizers = load_checkpoint(None, model, optimizers, stage="stage1")
+
     # 损失函数
     criterion = nn.CrossEntropyLoss()
 
-    for epoch in range(EPOCHS_STAGE1):
+    for epoch in range(start_epoch, EPOCHS_STAGE1):
         epoch_start_time = time.time()
         log_message(f"第一阶段训练 - Epoch {epoch + 1}/{EPOCHS_STAGE1}")
         model.train()
@@ -121,10 +258,6 @@ def train_stage1(model, train_loaders, val_loader, test_loader, device):
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
 
-                # if (batch_idx + 1) % 50 == 0 or (batch_idx + 1) == len(train_loader): # 减少日志频率
-                #     log_message(
-                #         f"    Expert {expert_idx} Batch [{batch_idx + 1}/{len(train_loader)}] Loss: {loss.item():.4f} Acc: {correct / total:.4f} Time: {batch_time_taken:.2f}s")
-
             # 记录每个专家的训练损失和准确率
             avg_loss = epoch_loss / len(train_loader)
             accuracy = correct / total
@@ -136,8 +269,6 @@ def train_stage1(model, train_loaders, val_loader, test_loader, device):
                 f"  \t专家{expert_idx} - 训练损失: {avg_loss:.4f}, 准确率: {accuracy:.4f}, 耗时: {expert_epoch_time_taken:.2f}s (Avg Batch: {expert_batch_train_time / len(train_loader):.2f}s)")
 
         epoch_time_taken = time.time() - epoch_start_time
-        # log_message(
-        #     f"第一阶段训练 - Epoch {epoch + 1}/{EPOCHS_STAGE1} 完成, 总训练耗时: {total_epoch_train_time:.2f}s, 总耗时: {epoch_time_taken:.2f}s")
 
         # 每个epoch结束后验证
         # 验证集评估
@@ -236,9 +367,9 @@ def validate_experts(model, data_loader, criterion, writer, epoch, device, split
 
 
 # 第二阶段训练：仅训练路由器
-def train_stage2(model, train_loader, val_loader, test_loader, device):
+def train_stage2(model, train_loader, val_loader, test_loader, device, resume_training=False):
     """
-    第二阶段训练：冻结专家参数，只训练路由器
+    第二阶段训练：冻结专家参数，只训练路由部分作为粗粒度分类器
     """
     log_message(f"开始第二阶段训练...")
     writer = SummaryWriter(os.path.join(RESULTS_PATH, 'logs', 'stage2'))
@@ -254,17 +385,31 @@ def train_stage2(model, train_loader, val_loader, test_loader, device):
     for param in model.router.parameters():
         param.requires_grad = True
 
-    # 创建优化器
-    optimizer = optim.Adam(model.router.parameters(), lr=LEARNING_RATE_STAGE2)
+    # 打印和确认参数训练状态
+    log_message("参数训练状态检查:")
+    for name, param in model.named_parameters():
+        if 'router' in name:
+            log_message(f"  {name}: requires_grad={param.requires_grad}")
+
+    # 创建优化器，只优化路由器参数
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=LEARNING_RATE_STAGE2)
+
+    # 使用交叉熵损失函数，用于路由器分类任务
     criterion = nn.CrossEntropyLoss()
+
+    # 添加恢复训练功能
+    start_epoch = 0
+    best_val_acc = 0.0
+    if resume_training:
+        start_epoch, best_val_acc, model, optimizer = load_checkpoint(None, model, optimizer, stage="stage2")
 
     # 创建混合精度训练的scaler
     scaler = GradScaler() if USE_AMP else None
 
-    for epoch in range(EPOCHS_STAGE2):
+    for epoch in range(start_epoch, EPOCHS_STAGE2):
         epoch_start_time = time.time()
         log_message(f"第二阶段训练 - Epoch {epoch + 1}/{EPOCHS_STAGE2}")
-        model.train()
+        model.train()  # 确保模型处于训练模式
 
         epoch_loss = 0
         correct = 0
@@ -275,61 +420,32 @@ def train_stage2(model, train_loader, val_loader, test_loader, device):
             batch_start_time = time.time()
             inputs, targets = inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
 
+            # 将原始类别标签转换为对应的专家索引
+            expert_targets = get_expert_indices(targets, model.class_ranges).to(device)
+
             optimizer.zero_grad(set_to_none=True)  # 更快地重置梯度
 
             # 使用混合精度训练
             if USE_AMP and scaler is not None:
                 with autocast():
-                    # 前向传播
+                    # 前向传播，只计算到路由器
                     features = model.backbone(inputs)
-                    routing_weights, _ = model.router(features)
+                    _, router_logits = model.router(features)
 
-                    # 计算每个专家的输出
-                    expert_outputs = []
-                    for expert_idx, expert in enumerate(model.experts):
-                        start_class, end_class = model.class_ranges[expert_idx]
-                        logits = expert(features)
-
-                        # 将专家输出扩展到全类别空间
-                        full_logits = torch.zeros(inputs.size(0), model.total_classes, device=inputs.device)
-                        full_logits[:, start_class:end_class] = logits
-                        expert_outputs.append(full_logits)
-
-                    # 根据路由权重融合专家输出
-                    combined_outputs = torch.zeros_like(expert_outputs[0])
-                    for i, output in enumerate(expert_outputs):
-                        combined_outputs += output * routing_weights[:, i].unsqueeze(1)
-
-                    # 计算损失
-                    loss = criterion(combined_outputs, targets)
+                    # 计算损失 - 路由器输出与专家目标之间的交叉熵
+                    loss = criterion(router_logits, expert_targets)
 
                 # 使用scaler进行反向传播和优化
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                # 前向传播
+                # 前向传播，只计算到路由器
                 features = model.backbone(inputs)
-                routing_weights, _ = model.router(features)
+                _, router_logits = model.router(features)
 
-                # 计算每个专家的输出
-                expert_outputs = []
-                for expert_idx, expert in enumerate(model.experts):
-                    start_class, end_class = model.class_ranges[expert_idx]
-                    logits = expert(features)
-
-                    # 将专家输出扩展到全类别空间
-                    full_logits = torch.zeros(inputs.size(0), model.total_classes, device=inputs.device)
-                    full_logits[:, start_class:end_class] = logits
-                    expert_outputs.append(full_logits)
-
-                # 根据路由权重融合专家输出
-                combined_outputs = torch.zeros_like(expert_outputs[0])
-                for i, output in enumerate(expert_outputs):
-                    combined_outputs += output * routing_weights[:, i].unsqueeze(1)
-
-                # 计算损失
-                loss = criterion(combined_outputs, targets)
+                # 计算损失 - 路由器输出与专家目标之间的交叉熵
+                loss = criterion(router_logits, expert_targets)
 
                 # 反向传播和优化
                 loss.backward()
@@ -337,44 +453,35 @@ def train_stage2(model, train_loader, val_loader, test_loader, device):
 
             batch_time_taken = time.time() - batch_start_time
             epoch_batch_train_time += batch_time_taken
-            # 统计
+
+            # 统计路由准确率
             epoch_loss += loss.item()
-            _, predicted = combined_outputs.max(1)
+            _, predicted_experts = router_logits.max(1)
             total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
+            correct += predicted_experts.eq(expert_targets).sum().item()
 
-            if (batch_idx + 1) % 50 == 0 or (batch_idx + 1) == len(train_loader):  # 减少日志频率
-                log_message(
-                    f"    Batch [{batch_idx + 1}/{len(train_loader)}] Loss: {loss.item():.4f} Acc: {correct / total:.4f} Time: {batch_time_taken:.2f}s")
-
-        # 记录训练损失和准确率
+        # 记录训练损失和路由准确率
         avg_loss = epoch_loss / len(train_loader)
-        accuracy = correct / total
+        routing_accuracy = correct / total
         epoch_time_taken = time.time() - epoch_start_time
         writer.add_scalar('train_loss', avg_loss, epoch)
-        writer.add_scalar('train_accuracy', accuracy, epoch)
+        writer.add_scalar('routing_accuracy', routing_accuracy, epoch)
         log_message(
-            f"  训练损失: {avg_loss:.4f}, 准确率: {accuracy:.4f}, 耗时: {epoch_time_taken:.2f}s (Avg Batch: {epoch_batch_train_time / len(train_loader):.2f}s)")
+            f"  训练损失: {avg_loss:.4f}, 路由准确率: {routing_accuracy:.4f}, 耗时: {epoch_time_taken:.2f}s (Avg Batch: {epoch_batch_train_time / len(train_loader):.2f}s)")
 
-        # 验证集评估
-        val_loss, val_accuracy, val_class_accuracies = validate_full_model(model, val_loader, criterion, device, "val")
-        writer.add_scalar('val_loss', val_loss, epoch)
+        # 每轮结束后评估完整模型性能
+        val_loss, val_accuracy, val_class_accuracies = validate_full_model(model, val_loader, nn.CrossEntropyLoss(),
+                                                                           device, "valid")
         writer.add_scalar('val_accuracy', val_accuracy, epoch)
 
-        # 测试集评估
-        test_loss, test_accuracy, test_class_accuracies = validate_full_model(model, test_loader, criterion, device,
-                                                                              "test")
-        writer.add_scalar('test_loss', test_loss, epoch)
+        test_loss, test_accuracy, test_class_accuracies = validate_full_model(model, test_loader, nn.CrossEntropyLoss(),
+                                                                              device, "test")
         writer.add_scalar('test_accuracy', test_accuracy, epoch)
 
         # 记录每个类别区间的准确率
         for i, (start, end) in enumerate(model.class_ranges):
             writer.add_scalar(f'val_accuracy_classes_{start}-{end}', val_class_accuracies[i], epoch)
             writer.add_scalar(f'test_accuracy_classes_{start}-{end}', test_class_accuracies[i], epoch)
-
-        # 打印验证和测试结果
-        log_message(f"  验证损失: {val_loss:.4f}, 准确率: {val_accuracy:.4f}")
-        log_message(f"  测试损失: {test_loss:.4f}, 准确率: {test_accuracy:.4f}")
 
         # 保存检查点
         if (epoch + 1) % 5 == 0 or (epoch + 1) == EPOCHS_STAGE2:
@@ -383,9 +490,8 @@ def train_stage2(model, train_loader, val_loader, test_loader, device):
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': val_loss,
+                'routing_accuracy': routing_accuracy,
                 'val_accuracy': val_accuracy,
-                'test_loss': test_loss,
                 'test_accuracy': test_accuracy,
             }, checkpoint_path)
             log_message(f"已保存检查点到 {checkpoint_path}")
@@ -394,6 +500,7 @@ def train_stage2(model, train_loader, val_loader, test_loader, device):
     final_checkpoint_path = os.path.join(RESULTS_PATH, 'param', 'stage2_final.pth')
     torch.save({
         'model_state_dict': model.state_dict(),
+        'routing_accuracy': routing_accuracy,
         'val_accuracy': val_accuracy,
         'test_accuracy': test_accuracy,
     }, final_checkpoint_path)
@@ -401,6 +508,24 @@ def train_stage2(model, train_loader, val_loader, test_loader, device):
     writer.close()
 
     return model
+
+
+# 辅助函数：将原始类别标签转换为对应的专家索引
+def get_expert_indices(targets, class_ranges):
+    """
+    将原始类别标签映射到对应的专家索引
+    
+    Args:
+        targets: 原始类别标签
+        class_ranges: 专家负责的类别范围列表 [(start1, end1), (start2, end2), ...]
+    
+    Returns:
+        专家索引张量
+    """
+    expert_indices = torch.zeros_like(targets)
+    for expert_idx, (start_class, end_class) in enumerate(class_ranges):
+        expert_indices[(targets >= start_class) & (targets <= end_class)] = expert_idx
+    return expert_indices
 
 
 def validate_full_model(model, data_loader, criterion, device, split="val"):
@@ -454,9 +579,10 @@ def validate_full_model(model, data_loader, criterion, device, split="val"):
     # 计算每个类别区间的准确率
     class_accuracies = [correct / total if total > 0 else 0 for correct, total in zip(class_correct, class_total)]
 
-    log_message(f"{split.capitalize()} 损失: {avg_loss:.4f}, 准确率: {accuracy:.4f}")
+    log_message(f"\t{split.capitalize()} loss: {avg_loss:.4f}, accuracy: {accuracy:.4f}")
     for i, (start, end) in enumerate(model.class_ranges):
-        log_message(f"  类别 {start}-{end - 1} 准确率: {class_accuracies[i]:.4f} ({class_correct[i]}/{class_total[i]})")
+        log_message(
+            f"\t  类别 {start}-{end} 准确率: {class_accuracies[i]:.4f} ({class_correct[i]}/{class_total[i]})")
 
     return avg_loss, accuracy, class_accuracies
 
@@ -483,10 +609,15 @@ if __name__ == "__main__":
     log_message(f"工作进程数: {NUM_WORKERS}")
     log_message(f"专家数量: {NUM_EXPERTS}")
     log_message(f"路由类型: {ROUTING_TYPE}")
+    log_message(f"预训练模型路径: {PRETRAINED_RESNET18_PATH}")
 
     # 配置数据并行训练，利用多个GPU
     multi_gpu = torch.cuda.device_count() > 1
     log_message(f"使用GPU数量: {torch.cuda.device_count()}")
+
+    # 添加继续训练选项
+    RESUME_STAGE1 = True  # 设置是否从检查点继续第一阶段训练
+    RESUME_STAGE2 = True  # 设置是否从检查点继续第二阶段训练
 
     # 初始化设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -512,6 +643,9 @@ if __name__ == "__main__":
         input_width=input_width
     )
 
+    # 加载预训练ResNet18权重
+    model = load_pretrained_weights(model, PRETRAINED_RESNET18_PATH)
+
     # 如果有多GPU，使用DataParallel
     if multi_gpu:
         log_message("启用多GPU并行训练")
@@ -520,7 +654,8 @@ if __name__ == "__main__":
     model.to(device)
 
     # 进行两阶段训练
-    model = train_stage1(model, train_loaders, val_loader, test_loader, device)
-    model = train_stage2(model, full_train_loader, val_loader, test_loader, device)
+    model = train_stage1(model, train_loaders, val_loader, test_loader, device, resume_training=RESUME_STAGE1)
+    model = train_stage2(model, full_train_loader, val_loader, test_loader, device, resume_training=RESUME_STAGE2)
 
     log_message("训练完成！")
+    log_message(f"=== 训练结束于 {datetime.datetime.now().strftime('%Y%m%d_%H%M%S')} ===")
