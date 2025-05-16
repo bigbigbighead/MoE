@@ -12,7 +12,8 @@ import glob  # 添加glob模块用于查找文件
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/ResNet/1"
+RESULTS_PATH = "results/AppClassNet/top50/ResNet/4"  # 修改路径反映处理前100类
+PRETRAINED_MODEL_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练模型路径
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -36,16 +37,78 @@ def log_message(message, log_file=LOG_FILE):
 BATCH_SIZE = 1024
 EPOCHS = 1000
 LEARNING_RATE = 0.001
-NUM_CLASSES = 200  # AppClassNet 类别数
+NUM_CLASSES = 50  # 修改为只处理前10类
 
 
-# 加载数据集
-def load_data(split):
+# 加载预训练模型并冻结参数
+def load_pretrained_model(pretrained_path, num_classes=200):
+    """
+    加载预训练的ResNet18模型，冻结除最后一层外的所有参数
+
+    Args:
+        pretrained_path: 预训练模型路径
+        num_classes: 新的分类数量
+
+    Returns:
+        model: 加载了预训练参数并冻结了部分层的模型
+    """
+    # 初始化新模型
+    model = resnet18(num_classes=num_classes)
+
+    # 加载预训练权重
+    if os.path.isfile(pretrained_path):
+        log_message(f"加载预训练模型: {pretrained_path}")
+        checkpoint = torch.load(pretrained_path)
+
+        # 检查加载的是模型状态字典还是完整检查点
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            pretrained_dict = checkpoint['model_state_dict']
+        else:
+            pretrained_dict = checkpoint
+
+        # 过滤掉最后一个全连接层的参数
+        model_dict = model.state_dict()
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'fc' not in k and k in model_dict}
+
+        # 更新当前模型的参数
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
+
+        log_message("成功加载预训练权重（除最后一层分类层）")
+    else:
+        log_message(f"找不到预训练模型: {pretrained_path}, 将使用随机初始化的模型")
+
+    # 冻结除了fc层以外的所有层
+    for name, param in model.named_parameters():
+        if 'fc' not in name:
+            param.requires_grad = False
+            log_message(f"冻结参数层: {name}")
+        else:
+            log_message(f"可训练参数层: {name}")
+
+    # 打印可训练参数数量
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    log_message(f"可训练参数: {trainable_params}, 总参数: {total_params}, 比例: {trainable_params / total_params:.4%}")
+
+    return model
+
+
+# 加载数据集并筛选前100类
+def load_data(split, top_num=50):
     x = np.load(f"{DATASET_PATH}/{split}_x.npy")
     y = np.load(f"{DATASET_PATH}/{split}_y.npy")
 
-    # 检查并打印数据形状，以便调试
-    message = f"{split} data shape before processing: {x.shape}"
+    # 检查并打印原始数据形状，以便调试
+    message = f"{split} 原始数据形状: {x.shape}, 标签形状: {y.shape}"
+    log_message(message)
+
+    # 筛选前100类的数据
+    mask = y < top_num
+    x = x[mask]
+    y = y[mask]
+
+    message = f"{split} 筛选后数据形状 (仅前{top_num}类): {x.shape}, 标签形状: {y.shape}"
     log_message(message)
 
     # 根据输入数据的实际形状调整
@@ -58,7 +121,7 @@ def load_data(split):
         # 假设数据是1024维的特征向量
         x = torch.tensor(x, dtype=torch.float32).reshape(-1, 1, 1, x.shape[1])
 
-    log_message(f"{split} data shape after processing: {x.shape}")
+    log_message(f"{split} 处理后数据形状: {x.shape}")
     y = torch.tensor(y, dtype=torch.long)
     return x, y
 
@@ -123,12 +186,12 @@ def validate(model, loader, criterion, device):
 def load_checkpoint(checkpoint_path=None, model=None, optimizer=None):
     """
     加载模型检查点以继续训练
-    
+
     Args:
         checkpoint_path: 模型检查点文件路径，如果为None则寻找最新的检查点
         model: 要加载参数的模型
         optimizer: 要加载状态的优化器
-        
+
     Returns:
         start_epoch: 应该开始训练的轮次
         best_val_acc: 最佳验证准确率
@@ -191,21 +254,21 @@ def load_checkpoint(checkpoint_path=None, model=None, optimizer=None):
     return start_epoch, best_val_acc, model, optimizer
 
 
-
 if __name__ == "__main__":
     # 记录训练开始信息和配置信息
-    log_message(f"=== 训练开始于 {current_time} ===")
+    log_message(f"=== 迁移学习训练开始于 {current_time} ===")
     log_message(f"BatchSize: {BATCH_SIZE}, Learning Rate: {LEARNING_RATE}, Epochs: {EPOCHS}")
-    log_message(f"数据集路径: {DATASET_PATH}")
+    log_message(f"数据集路径: {DATASET_PATH} (仅使用前{NUM_CLASSES}类)")
     log_message(f"结果保存路径: {RESULTS_PATH}")
+    log_message(f"预训练模型路径: {PRETRAINED_MODEL_PATH}")
     log_message(f"使用设备: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
 
-    train_x, train_y = load_data("train")
-    valid_x, valid_y = load_data("valid")
-    test_x, test_y = load_data("test")  # 加载测试集数据
+    train_x, train_y = load_data("train", NUM_CLASSES)
+    valid_x, valid_y = load_data("valid", NUM_CLASSES)
+    test_x, test_y = load_data("test", NUM_CLASSES)  # 加载测试集数据
 
     # 打印数据形状，用于调试
-    log_message(f"Final shapes - Train: {train_x.shape}, Valid: {valid_x.shape}, Test: {test_x.shape}")
+    log_message(f"最终数据形状 - 训练集: {train_x.shape}, 验证集: {valid_x.shape}, 测试集: {test_x.shape}")
 
     train_dataset = torch.utils.data.TensorDataset(train_x, train_y)
     val_dataset = torch.utils.data.TensorDataset(valid_x, valid_y)
@@ -215,15 +278,15 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=12,  # 增加工作进程数
-        pin_memory=True,  # 使用页锁定内存加速CPU到GPU的数据传输
-        prefetch_factor=2  # 预加载批次数
+        num_workers=12,
+        pin_memory=True,
+        prefetch_factor=2
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=12,  # 增加工作进程数
+        num_workers=12,
         pin_memory=True
     )
 
@@ -231,40 +294,31 @@ if __name__ == "__main__":
         test_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=12,  # 增加工作进程数
+        num_workers=12,
         pin_memory=True
     )
 
-    # 初始化模型
+    # 初始化模型 - 替换为加载预训练模型并冻结参数的版本
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = resnet18(num_classes=NUM_CLASSES).to(device)
+    model = load_pretrained_model(PRETRAINED_MODEL_PATH, NUM_CLASSES).to(device)
 
-    # 损失函数和优化器
+    # 损失函数和优化器 - 只优化fc层的参数
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
-    # 添加继续训练选项
-    RESUME_TRAINING = False  # 可以通过命令行参数或配置文件设置此值
-    CHECKPOINT_PATH = None  # 可以指定特定的检查点文件，None表示使用最新的
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=LEARNING_RATE)
 
     start_epoch = 0
     best_val_acc = 0.0
 
-    # 如果继续训练，加载检查点
-    if RESUME_TRAINING:
-        start_epoch, best_val_acc, model, optimizer = load_checkpoint(CHECKPOINT_PATH, model, optimizer)
-
     # 记录模型信息
-    log_message(f"模型: ResNet18, 分类数: {NUM_CLASSES}")
-    if RESUME_TRAINING:
-        log_message(f"继续训练: 从第 {start_epoch} 轮开始")
+    log_message(f"模型: ResNet18（迁移学习）, 分类数: {NUM_CLASSES}")
+    log_message(f"只训练最后一层全连接分类层，其他层参数冻结")
     log_message("=" * 50)
 
     # 训练循环
-    for epoch in range(start_epoch, EPOCHS):  # 修改为从start_epoch开始
+    for epoch in range(start_epoch, EPOCHS):
         train_loss, train_acc, train_time = train_one_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_acc, val_time = validate(model, val_loader, criterion, device)
-        test_loss, test_acc, test_time = validate(model, test_loader, criterion, device)  # 测试集验证
+        test_loss, test_acc, test_time = validate(model, test_loader, criterion, device)
 
         epoch_message = f"Epoch {epoch + 1}/{EPOCHS}"
         train_message = f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Time: {train_time:.2f}s"

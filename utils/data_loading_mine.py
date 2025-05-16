@@ -8,7 +8,7 @@ from torchvision import datasets, transforms
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/4"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/6"
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -67,14 +67,13 @@ def load_data(split, dataset_path=DATASET_PATH):
 
 
 # 数据加载器
-def get_dataloaders():
+def get_dataloaders(class_ranges, dataset_path=DATASET_PATH):
     # 加载数据集
     train_x, train_y = load_data("train")
     val_x, val_y = load_data("valid")
     test_x, test_y = load_data("test")
 
     # 创建按专家类别范围分割的数据集
-    class_ranges = [(0, 99), (100, 149), (150, 199)]
     train_subsets = []
 
     # 将训练数据分割为每个专家负责的子集

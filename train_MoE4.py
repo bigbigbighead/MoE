@@ -14,7 +14,7 @@ from utils.data_loading_mine import log_message, load_data, get_dataloaders
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/4"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/6"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -29,11 +29,12 @@ LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 
 # 优化超参数
 BATCH_SIZE = 2048  # 批次大小
-EPOCHS_STAGE1 = 300  # 第一阶段训练轮数
+EPOCHS_STAGE1 = 100  # 第一阶段训练轮数
 EPOCHS_STAGE2 = 100  # 第二阶段训练轮数
 LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
 LEARNING_RATE_STAGE2 = 0.0001  # 第二阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
+CLASS_RANGES = [(0, 99), (100, 149), (150, 199)]
 NUM_EXPERTS = 3  # MoE专家头数量
 ROUTING_TYPE = 'hard'  # 路由类型: 'softmax' 或 'hard'
 NUM_WORKERS = 8  # 数据加载的worker数量
@@ -41,7 +42,7 @@ PIN_MEMORY = True  # 确保启用pin_memory
 PREFETCH_FACTOR = 8  # 增加预取因子
 
 # 自动混合精度训练配置
-USE_AMP = True  # 启��自动混合精度训练
+USE_AMP = True  # 启动自动混合精度训练
 
 
 # 查找并加载模型检查点
@@ -113,12 +114,12 @@ def load_checkpoint(checkpoint_path=None, model=None, optimizer=None, stage="sta
 # 加载预训练ResNet18模型并迁移参数到MoE模型
 def load_pretrained_weights(moe_model, pretrained_path):
     """
-    从预训练ResNet18模型加载权重到MoE模型的backbone部��
-    
+    从预训练ResNet18模型加载权重到MoE模型的backbone部分
+
     Args:
         moe_model: MoE4Model实例
         pretrained_path: 预训练ResNet18模型的路径
-    
+
     Returns:
         加载了预训练权重的MoE模型
     """
@@ -138,30 +139,41 @@ def load_pretrained_weights(moe_model, pretrained_path):
     # 创建一个新字典，只包含backbone相关的参数
     backbone_dict = {}
 
+    # ResNet18中需要排除的层（通常是最终全连接分类层）
+    exclude_layers = ['fc']
+
     # 遍历预训练模型的所有参数
     for k, v in pretrained_dict.items():
-        # 将ResNet参数映射到MoE backbone
-        if k.startswith('conv1') or k.startswith('bn1') or k.startswith('layer'):
+        # 排除分类层
+        if not any(exclude_layer in k for exclude_layer in exclude_layers):
             # 添加backbone前缀以匹配MoE模型的键名
             backbone_key = f'backbone.{k}'
             backbone_dict[backbone_key] = v
 
-    # 仅加载匹配的参数
-    moe_state_dict = moe_model.state_dict()
+    log_message(f"从预训练模型中提取了 {len(backbone_dict)} 个参数")
 
-    # 检查参数形状匹配
+    # 检查MoE模型backbone中是否包含所有需要的键
+    moe_state_dict = moe_model.state_dict()
+    missing_keys = [k for k in backbone_dict.keys() if k not in moe_state_dict]
+    unexpected_keys = [k for k in backbone_dict.keys() if
+                       k in moe_state_dict and backbone_dict[k].shape != moe_state_dict[k].shape]
+
+    if missing_keys:
+        log_message(f"MoE模型中缺少以下键: {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
+
+    if unexpected_keys:
+        log_message(f"形状不匹配的键: {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
+
+    # 仅加载匹配的参数
+    matched_keys = 0
     for k, v in backbone_dict.items():
         if k in moe_state_dict and moe_state_dict[k].shape == v.shape:
             moe_state_dict[k] = v
-        else:
-            if k in moe_state_dict:
-                log_message(f"形状不匹配: {k}, 预训练: {v.shape}, MoE: {moe_state_dict[k].shape}")
-            else:
-                log_message(f"MoE模型中不存在键: {k}")
+            matched_keys += 1
 
     # 加载修改后的状态字典
     moe_model.load_state_dict(moe_state_dict)
-    log_message("预训练权重成功加载到MoE模型backbone")
+    log_message(f"成功将 {matched_keys} 个预训练权重参数加载到MoE模型backbone（总共 {len(backbone_dict)} 个参数）")
 
     return moe_model
 
@@ -514,11 +526,11 @@ def train_stage2(model, train_loader, val_loader, test_loader, device, resume_tr
 def get_expert_indices(targets, class_ranges):
     """
     将原始类别标签映射到对应的专家索引
-    
+
     Args:
         targets: 原始类别标签
         class_ranges: 专家负责的类别范围列表 [(start1, end1), (start2, end2), ...]
-    
+
     Returns:
         专家索引张量
     """
@@ -528,7 +540,7 @@ def get_expert_indices(targets, class_ranges):
     return expert_indices
 
 
-def validate_full_model(model, data_loader, criterion, device, split="val"):
+def validate_full_model(model, data_loader, criterion, device, split="valid"):
     """验证完整模型性能，并返回每个类别区间的准确率"""
     model.eval()
     val_loss = 0
@@ -623,7 +635,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 加载数据
-    train_loaders, full_train_loader, val_loader, test_loader = get_dataloaders()
+    train_loaders, full_train_loader, val_loader, test_loader = get_dataloaders(CLASS_RANGES)
 
     # 从训练数据中获取输入形状
     sample_input, _ = next(iter(full_train_loader))
@@ -636,7 +648,7 @@ if __name__ == "__main__":
     # 创建模型
     model = MoE4Model(
         total_classes=NUM_CLASSES,
-        class_ranges=[(0, 99), (100, 149), (150, 199)],
+        class_ranges=CLASS_RANGES,
         routing_type=ROUTING_TYPE,
         input_channels=input_channels,
         input_height=input_height,
