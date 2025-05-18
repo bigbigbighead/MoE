@@ -8,7 +8,7 @@ from torchvision import datasets, transforms
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/4"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/11"
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -27,7 +27,7 @@ LEARNING_RATE_STAGE2 = 0.0001  # 第二阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
 NUM_EXPERTS = 3  # MoE专家头数量
 ROUTING_TYPE = 'hard'  # 路由类型: 'softmax' 或 'hard'
-NUM_WORKERS = 8  # 数据加载的worker数量
+NUM_WORKERS = 2  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
 PREFETCH_FACTOR = 8  # 增加预取因子
 
@@ -67,44 +67,72 @@ def load_data(split, dataset_path=DATASET_PATH):
 
 
 # 数据加载器
-def get_dataloaders():
+def get_dataloaders(class_ranges, dataset_path=DATASET_PATH):
     # 加载数据集
     train_x, train_y = load_data("train")
     val_x, val_y = load_data("valid")
     test_x, test_y = load_data("test")
 
     # 创建按专家类别范围分割的数据集
-    class_ranges = [(0, 99), (100, 149), (150, 199)]
     train_subsets = []
+    val_subsets = []
+    test_subsets = []
 
     # 将训练数据分割为每个专家负责的子集
     for start_class, end_class in class_ranges:
-        indices = torch.where((train_y >= start_class) & (train_y <= end_class))[0]
-        subset_x = train_x[indices]
-        subset_y = train_y[indices] - start_class  # 调整标签使其从0开始
-        train_subsets.append(TensorDataset(subset_x, subset_y))
+        # 训练集划分
+        train_indices = torch.where((train_y >= start_class) & (train_y <= end_class))[0]
+        train_subset_x = train_x[train_indices]
+        train_subset_y = train_y[train_indices] - start_class  # 调整标签使其从0开始
+        train_subsets.append(TensorDataset(train_subset_x, train_subset_y))
 
-    # 创建数据加载器
-    train_loaders = []
-    for subset in train_subsets:
-        train_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE, shuffle=True,
-                                        num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                                        prefetch_factor=PREFETCH_FACTOR, persistent_workers=True))
+        # 验证集划分
+        val_indices = torch.where((val_y >= start_class) & (val_y <= end_class))[0]
+        val_subset_x = val_x[val_indices]
+        val_subset_y = val_y[val_indices] - start_class  # 调整标签使其从0开始
+        val_subsets.append(TensorDataset(val_subset_x, val_subset_y))
 
-    # 完整数据集的加载器
-    full_train_dataset = TensorDataset(train_x, train_y)
-    full_train_loader = DataLoader(full_train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                                   num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                                   prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
+        # 测试集划分
+        test_indices = torch.where((test_y >= start_class) & (test_y <= end_class))[0]
+        test_subset_x = test_x[test_indices]
+        test_subset_y = test_y[test_indices] - start_class  # 调整标签使其从0开始
+        test_subsets.append(TensorDataset(test_subset_x, test_subset_y))
 
-    val_dataset = TensorDataset(val_x, val_y)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
-                            num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                            prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
+        # 创建数据加载器
+        train_loaders = []
+        for subset in train_subsets:
+            train_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE, shuffle=True,
+                                            num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                                            prefetch_factor=PREFETCH_FACTOR, persistent_workers=True))
 
-    test_dataset = TensorDataset(test_x, test_y)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
-                             num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                             prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
+        # 创建验证集加载器
+        val_loaders = []
+        for subset in val_subsets:
+            val_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE * 2, shuffle=False,
+                                          num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                                          prefetch_factor=PREFETCH_FACTOR, persistent_workers=True))
 
-    return train_loaders, full_train_loader, val_loader, test_loader
+        # 创建测试集加载器
+        test_loaders = []
+        for subset in test_subsets:
+            test_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE * 2, shuffle=False,
+                                           num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                                           prefetch_factor=PREFETCH_FACTOR, persistent_workers=True))
+
+        # 完整数据集的加载器
+        full_train_dataset = TensorDataset(train_x, train_y)
+        full_train_loader = DataLoader(full_train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                                       num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                                       prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
+
+        val_dataset = TensorDataset(val_x, val_y)
+        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
+                                num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                                prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
+
+        test_dataset = TensorDataset(test_x, test_y)
+        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
+                                 num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                                 prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
+
+    return train_loaders, val_loaders, test_loaders, full_train_loader, val_loader, test_loader
