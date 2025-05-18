@@ -28,7 +28,7 @@ class ResNetBlock(nn.Module):
 
 
 class ResNet(nn.Module):
-    def __init__(self, block, layers, num_classes=1000, input_channels=1, input_height=1, input_width=1024):
+    def __init__(self, block, layers, num_classes=100, input_channels=1, input_height=1, input_width=1024):
         super(ResNet, self).__init__()
         self.in_channels = 64
 
@@ -91,7 +91,7 @@ class ResNet(nn.Module):
         return x
 
 
-def resnet18(num_classes=200, input_channels=1, input_height=1, input_width=1024):
+def resnet18(num_classes=100, input_channels=1, input_height=1, input_width=1024):
     """
     创建一个ResNet-18模型
 
@@ -104,5 +104,6 @@ def resnet18(num_classes=200, input_channels=1, input_height=1, input_width=1024
     return ResNet(ResNetBlock, [2, 2, 2, 2], num_classes, input_channels, input_height, input_width)
 
 
-def resnet34(num_classes=200, input_channels=1, input_height=1, input_width=1024):
+def resnet34(num_classes=100, input_channels=1, input_height=1, input_width=1024):
     return ResNet(ResNetBlock, [3, 4, 6, 3], num_classes, input_channels, input_height, input_width)
+
