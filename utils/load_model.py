@@ -1,7 +1,9 @@
 # 查找并加载模型检查点
 import glob
 import os
-from data_loading_mine import log_message
+import torch
+
+from utils.data_loading_mine import log_message
 
 
 def load_checkpoint(RESULTS_PATH, checkpoint_path=None, model=None, optimizer=None, stage="stage1"):
@@ -65,7 +67,7 @@ def load_checkpoint(RESULTS_PATH, checkpoint_path=None, model=None, optimizer=No
         model.load_state_dict(checkpoint)
 
     log_message(
-        f"成功加载第{stage}阶段检查点，从第 {start_epoch} 轮开始继续训练，当前最佳验证准确率: {best_val_acc:.2f}%")
+        f"成功加载第{stage}阶段检查点，从第 {start_epoch} 轮开始继续训练，当前最佳验证准确率: {best_val_acc:.2f}")
     return start_epoch, best_val_acc, model, optimizer
 
 

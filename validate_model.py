@@ -1,6 +1,7 @@
 import torch
 from torch.cuda.amp import autocast, GradScaler
 from utils.data_loading_mine import log_message
+import time
 
 # 自动混合精度训练配置
 USE_AMP = True  # 启动自动混合精度训练
@@ -19,24 +20,21 @@ def validate_expert(model, data_loader, criterion, expert_idx, device):
             inputs = inputs.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
 
-            # 只筛选该专家负责的类别范围内的样本
-            mask = (targets >= start_class) & (targets <= end_class)
-            if mask.sum() > 0:
-                expert_inputs = inputs[mask]
-                expert_targets = targets[mask]  # 调整目标标签范围
+            # 数据加载时已经筛选过专家负责的类别样本，不需要再次筛选
+            # 直接使用所有加载的样本
 
-                # 前向传播
-                features = model.backbone(expert_inputs)
-                outputs = model.experts[expert_idx](features)
+            # 前向传播
+            features = model.backbone(inputs)
+            outputs = model.experts[expert_idx](features)
 
-                # 计算损失
-                loss = criterion(outputs, expert_targets)
-                val_loss += loss.item() * mask.sum().item()
+            # 计算损失
+            loss = criterion(outputs, targets)
+            val_loss += loss.item() * inputs.size(0)
 
-                # 计算准确率
-                _, predicted = outputs.max(1)
-                total += expert_targets.size(0)
-                correct += predicted.eq(expert_targets).sum().item()
+            # 计算准确率
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
 
     # 确保避免除零错误
     if total == 0:
@@ -47,6 +45,7 @@ def validate_expert(model, data_loader, criterion, expert_idx, device):
 
 def validate_full_model(model, data_loader, criterion, device, split="valid"):
     """验证完整模型性能，并返回每个类别区间的准确率"""
+    start_time = time.time()
     model.eval()
     val_loss = 0
     correct = 0
@@ -95,27 +94,29 @@ def validate_full_model(model, data_loader, criterion, device, split="valid"):
 
     # 计算每个类别区间的准确率
     class_accuracies = [correct / total if total > 0 else 0 for correct, total in zip(class_correct, class_total)]
-
-    log_message(f"\t{split.capitalize()} loss: {avg_loss:.4f}, accuracy: {accuracy:.4f}")
-    for i, (start, end) in enumerate(model.class_ranges):
-        log_message(
-            f"\t  类别 {start}-{end} 准确率: {class_accuracies[i]:.4f} ({class_correct[i]}/{class_total[i]})")
+    end_time = time.time()
+    log_message(
+        f"\t{split.capitalize()} loss: {avg_loss:.4f}, accuracy: {accuracy:.4f}, full model time: {end_time - start_time:.2f}s")
+    # for i, (start, end) in enumerate(model.class_ranges):
+    #     log_message(
+    #         f"\t  类别 {start}-{end} 准确率: {class_accuracies[i]:.4f} ({class_correct[i]}/{class_total[i]})")
 
     return avg_loss, accuracy, class_accuracies
 
 
-def validate_router_accuracy(model, data_loader, device):
+def validate_router_accuracy(model, data_loader, split, device):
     """
     验证路由器的分类准确率
-    
+
     Args:
         model: 模型
         data_loader: 数据加载器
         device: 设备
-        
+
     Returns:
         float: 路由器的分类准确率
     """
+    start_time = time.time()
     model.eval()
     correct = 0
     total = 0
@@ -150,8 +151,9 @@ def validate_router_accuracy(model, data_loader, device):
 
     # 计算路由器准确率
     router_accuracy = correct / total if total > 0 else 0
-
-    log_message(f"\t路由器分类准确率: {router_accuracy:.4f} ({correct}/{total})")
+    end_time = time.time()
+    log_message(
+        f"\t{split.capitalize()} set 上路由器分类准确率: {router_accuracy:.4f} ({correct}/{total}), 用时:{end_time - start_time:.2f}s")
 
     return router_accuracy
 

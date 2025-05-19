@@ -16,7 +16,7 @@ from validate_model import validate_expert, validate_full_model, validate_router
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/11"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/12"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -31,7 +31,7 @@ LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 
 # 优化超参数
 BATCH_SIZE = 2048  # 批次大小
-EPOCHS_STAGE1 = 100  # 第一阶段训练轮数
+EPOCHS_STAGE1 = 2  # 第一阶段训练轮数
 EPOCHS_STAGE2 = 100  # 第二阶段训练轮数
 LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
 LEARNING_RATE_STAGE2 = 0.0001  # 第二阶段学习率
@@ -238,6 +238,8 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
                 }, epoch_checkpoint_path)
                 log_message(f"  已保存专家{expert_idx}的Epoch {epoch + 1}检查点")
 
+        # 关闭该专家的数据加载器
+        del train_loader, val_loader_expert, test_loader_expert
         # 该专家训练完成
         log_message(f"专家{expert_idx}训练完成，最佳验证准确率: {best_val_acc:.4f}")
 
@@ -357,23 +359,27 @@ def train_stage2(model, train_loader, val_loader, test_loader, device, resume_tr
             f"  训练损失: {avg_loss:.4f}, 路由准确率: {routing_accuracy:.4f}, 耗时: {epoch_time_taken:.2f}s (Avg Batch: {epoch_batch_train_time / len(train_loader):.2f}s)")
 
         # 评估验证集上的路由器分类准确率
-        val_router_accuracy = validate_router_accuracy(model, val_loader, device)
+        val_router_accuracy = validate_router_accuracy(model, val_loader, 'valid', device)
         writer.add_scalar('val_routing_accuracy', val_router_accuracy, epoch)
-        log_message(f"  验证集上的路由器分类准确率: {val_router_accuracy:.4f}")
+        # log_message(f"  验证集上的路由器分类准确率: {val_router_accuracy:.4f}")
 
         # 评估测试集上的路由器分类准确率
-        test_router_accuracy = validate_router_accuracy(model, test_loader, device)
+        test_router_accuracy = validate_router_accuracy(model, test_loader, 'test', device)
         writer.add_scalar('test_routing_accuracy', test_router_accuracy, epoch)
-        log_message(f"  测试集上的路由器分类准确率: {test_router_accuracy:.4f}")
+        # log_message(f"  测试集上的路由器分类准确率: {test_router_accuracy:.4f}")
 
-        # 每轮结束后评估完整模型性能
-        val_loss, val_accuracy, val_class_accuracies = validate_full_model(model, val_loader, nn.CrossEntropyLoss(),
-                                                                           device, "valid")
-        writer.add_scalar('val_accuracy', val_accuracy, epoch)
-
-        test_loss, test_accuracy, test_class_accuracies = validate_full_model(model, test_loader, nn.CrossEntropyLoss(),
-                                                                              device, "test")
-        writer.add_scalar('test_accuracy', test_accuracy, epoch)
+        val_accuracy = 0
+        test_accuracy = 0
+        val_class_accuracies = [0] * len(model.class_ranges)
+        test_class_accuracies = [0] * len(model.class_ranges)
+        # # 每轮结束后评估完整模型性能
+        # val_loss, val_accuracy, val_class_accuracies = validate_full_model(model, val_loader, nn.CrossEntropyLoss(),
+        #                                                                    device, "valid")
+        # writer.add_scalar('val_accuracy', val_accuracy, epoch)
+        #
+        # test_loss, test_accuracy, test_class_accuracies = validate_full_model(model, test_loader, nn.CrossEntropyLoss(),
+        #                                                                       device, "test")
+        # writer.add_scalar('test_accuracy', test_accuracy, epoch)
 
         # 记录每个类别区间的准确率
         for i, (start, end) in enumerate(model.class_ranges):
