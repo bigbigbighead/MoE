@@ -53,7 +53,7 @@ class SpecializedExpert(nn.Module):
             nn.Linear(feat_dim, 256),
             nn.ReLU(),
             nn.Dropout(self.dropout_rate),  # 添加dropout
-            nn.Linear(256, self.num_classes)
+            nn.Linear(256, 200)
         )
 
     def forward(self, x):
@@ -61,7 +61,7 @@ class SpecializedExpert(nn.Module):
 
 
 class MoE4Model(nn.Module):
-    """按照MoE4设计文档实现的模型，专家按类别范围分工"""
+    """按照修改后的设计实现的模型，专家按类别范围分工，输出直接相加"""
 
     def __init__(self, total_classes=200, class_ranges=None, routing_type='hard',
                  input_channels=1, input_height=1, input_width=1024, dropout_rate=0):
@@ -74,7 +74,6 @@ class MoE4Model(nn.Module):
         self.class_ranges = class_ranges
         self.num_experts = len(class_ranges)
         self.total_classes = total_classes
-        self.routing_type = routing_type
         self.dropout_rate = dropout_rate
 
         # ResNet18 backbone
@@ -89,9 +88,6 @@ class MoE4Model(nn.Module):
 
         feat_dim = self.backbone.feat_dim  # 特征维度是512
 
-        # 路由器
-        self.router = MoE4Router(feat_dim, self.num_experts, routing_type, dropout_rate=dropout_rate)
-
         # 创建专家
         self.experts = nn.ModuleList()
         for class_range in self.class_ranges:
@@ -102,47 +98,32 @@ class MoE4Model(nn.Module):
         # 提取特征
         feat = self.backbone(x)
 
-        # 路由决策
-        routing_weights, router_logits = self.router(feat)
-
         # 获取每个专家的输出
         expert_outputs = []
         for expert in self.experts:
-            logits = expert(feat)  # 每个专家只输出其负责的类别
-            expert_outputs.append(logits)
+            expert_output = expert(feat)
+            expert_outputs.append(expert_output)
 
-        # 在训练阶段返回更多信息用于损失计算
-        return feat, expert_outputs, routing_weights, router_logits
+        # 将所有专家输出相加
+        combined_logits = torch.zeros_like(expert_outputs[0])
+        for output in expert_outputs:
+            combined_logits += output
+
+        # 返回特征和合并后的logits
+        return feat, expert_outputs, combined_logits
 
     def inference(self, x):
-        """推理模式：根据路由权重组合专家输出，生成完整的类别概率分布"""
+        """推理模式：直接将所有专家的输出相加"""
         feat = self.backbone(x)
 
-        # 路由决策
-        routing_weights, _ = self.router(feat)
+        # 获取每个专家的输出并相加
+        combined_logits = torch.zeros(x.size(0), self.total_classes, device=x.device)
 
-        # 获取每个专家的输出
-        expert_outputs = []
         for expert in self.experts:
-            logits = expert(feat)
-            expert_outputs.append(logits)
+            expert_output = expert(feat)
+            combined_logits += expert_output
 
-        # 创建完整类别的预测
-        batch_size = x.size(0)
-        final_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
-
-        # 根据专家负责的类别范围，将其输出填充到最终预测中
-        for i, expert in enumerate(self.experts):
-            start_idx, end_idx = self.class_ranges[i]
-            expert_logits = expert_outputs[i]
-
-            # 用路由权重加权专家输出
-            weighted_logits = expert_logits * routing_weights[:, i].unsqueeze(1)
-
-            # 填充到对应的类别位置
-            final_logits[:, start_idx:end_idx + 1] = weighted_logits
-
-        return final_logits
+        return combined_logits
 
     def predict(self, x):
         """返回预测的类别"""
