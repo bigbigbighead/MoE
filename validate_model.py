@@ -1,176 +1,73 @@
 import torch
-from torch.cuda.amp import autocast, GradScaler
-from utils.data_loading_mine import log_message
-import time
+import torch.nn as nn
+import torch.nn.functional as F
 
-# 自动混合精度训练配置
-USE_AMP = True  # 启动自动混合精度训练
-
-
-def validate_expert(model, data_loader, criterion, expert_idx, device):
+# 验证单个专家的性能
+def validate_expert(model, val_loader, criterion, expert_idx, device):
     """验证单个专家的性能"""
     model.eval()
-    start_class, end_class = model.class_ranges[expert_idx]
     val_loss = 0
     correct = 0
     total = 0
-
+    
+    start_class, end_class = model.module.class_ranges[expert_idx] if hasattr(model, 'module') else model.class_ranges[expert_idx]
+    
     with torch.no_grad():
-        for inputs, targets in data_loader:
-            inputs = inputs.to(device, non_blocking=True)
-            targets = targets.to(device, non_blocking=True)
-
-            # 数据加载时已经筛选过专家负责的类别样本，不需要再次筛选
-            # 直接使用所有加载的样本
-
-            # 前向传播
-            features = model.backbone(inputs)
-            outputs = model.experts[expert_idx](features)
-
+        for inputs, targets in val_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            
+            # 获取特征
+            features = model.module.backbone(inputs) if hasattr(model, 'module') else model.backbone(inputs)
+            
+            # 获取专家输出
+            outputs = model.module.experts[expert_idx](features) if hasattr(model, 'module') else model.experts[expert_idx](features)
+            
             # 计算损失
             loss = criterion(outputs, targets)
-            val_loss += loss.item() * inputs.size(0)
-
-            # 计算准确率
+            
+            val_loss += loss.item()
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
+    
+    return val_loss / len(val_loader), correct / total
 
-    # 确保避免除零错误
-    if total == 0:
-        return 0, 0
-
-    return val_loss / total, correct / total
-
-
-def validate_full_model(model, data_loader, criterion, device, split="valid"):
-    """验证完整模型性能，并返回每个类别区间的准确率"""
-    start_time = time.time()
+# 验证完整模型的性能
+def validate_full_model(model, val_loader, criterion, device):
+    """验证完整模型的性能，使用模型的inference方法确保使用新的推理逻辑"""
     model.eval()
     val_loss = 0
     correct = 0
     total = 0
-
-    # 为每个类别区间跟踪准确率
-    class_correct = [0] * len(model.class_ranges)
-    class_total = [0] * len(model.class_ranges)
-
+    
     with torch.no_grad():
-        for inputs, targets in data_loader:
-            inputs, targets = inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
-
-            # 使用混合精度推理
-            if USE_AMP:
-                with autocast():
-                    # 使用推理模式
-                    outputs = model.inference(inputs)
-
-                    # 计算损失
-                    loss = criterion(outputs, targets)
-            else:
-                # 使用推理模式
-                outputs = model.inference(inputs)
-
-                # 计算损失
-                loss = criterion(outputs, targets)
-
+        for inputs, targets in val_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            
+            # 使用inference方法获取模型预测（确保使用拼接逻辑）
+            logits = model.inference(inputs)
+            
+            loss = criterion(logits, targets)
+            
             val_loss += loss.item()
-
-            # 计算准确率
-            _, predicted = outputs.max(1)
+            _, predicted = logits.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
+    
+    return val_loss / len(val_loader), correct / total
 
-            # 计算每个类别区间的准确率
-            for i, (start, end) in enumerate(model.class_ranges):
-                mask = (targets >= start) & (targets <= end)
-                if mask.sum() > 0:
-                    class_total[i] += mask.sum().item()
-                    class_correct[i] += predicted[mask].eq(targets[mask]).sum().item()
+# 其他验证函数
+def validate_router_accuracy(model, val_loader, device):
+    """验证路由器的准确率（如果模型包含路由器）"""
+    # 这个函数可能不适用于MoE4Model，但保留以供参考
+    pass
 
-    # 计算平均损失和总体准确率
-    avg_loss = val_loss / len(data_loader)
-    accuracy = correct / total
-
-    # 计算每个类别区间的准确率
-    class_accuracies = [correct / total if total > 0 else 0 for correct, total in zip(class_correct, class_total)]
-    end_time = time.time()
-    log_message(
-        f"\t{split.capitalize()} loss: {avg_loss:.4f}, accuracy: {accuracy:.4f}, full model time: {end_time - start_time:.2f}s")
-    # for i, (start, end) in enumerate(model.class_ranges):
-    #     log_message(
-    #         f"\t  类别 {start}-{end} 准确率: {class_accuracies[i]:.4f} ({class_correct[i]}/{class_total[i]})")
-
-    return avg_loss, accuracy, class_accuracies
-
-
-def validate_router_accuracy(model, data_loader, split, device):
-    """
-    验证路由器的分类准确率
-
-    Args:
-        model: 模型
-        data_loader: 数据加载器
-        device: 设备
-
-    Returns:
-        float: 路由器的分类准确率
-    """
-    start_time = time.time()
-    model.eval()
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for inputs, targets in data_loader:
-            inputs = inputs.to(device, non_blocking=True)
-            targets = targets.to(device, non_blocking=True)
-
-            # 获取每个样本应该属于哪个专家
-            expert_targets = get_expert_indices(targets, model.class_ranges).to(device)
-
-            # 使用混合精度推理
-            if USE_AMP:
-                with autocast():
-                    # 获取backbone特征
-                    features = model.backbone(inputs)
-                    # 获取路由器的输出
-                    routing_weights, router_logits = model.router(features)
-            else:
-                # 获取backbone特征
-                features = model.backbone(inputs)
-                # 获取路由器的输出
-                routing_weights, router_logits = model.router(features)
-
-            # 获取路由器预测的专家
-            _, predicted_experts = router_logits.max(1)
-
-            # 统计正确分类的样本数
-            total += targets.size(0)
-            correct += predicted_experts.eq(expert_targets).sum().item()
-
-    # 计算路由器准确率
-    router_accuracy = correct / total if total > 0 else 0
-    end_time = time.time()
-    log_message(
-        f"\t{split.capitalize()} set 上路由器分类准确率: {router_accuracy:.4f} ({correct}/{total}), 用时:{end_time - start_time:.2f}s")
-
-    return router_accuracy
-
-
-# 辅助函数：将原始类别标签转换为对应的专家索引
 def get_expert_indices(targets, class_ranges):
-    """
-    将原始类别标签映射到对应的专家索引
-
-    Args:
-        targets: 原始类别标签
-        class_ranges: 专家负责的类别范围列表 [(start1, end1), (start2, end2), ...]
-
-    Returns:
-        专家索引张量
-    """
+    """根据目标类别确定对应的专家索引"""
     expert_indices = torch.zeros_like(targets)
-    for expert_idx, (start_class, end_class) in enumerate(class_ranges):
-        expert_indices[(targets >= start_class) & (targets <= end_class)] = expert_idx
+    
+    for i, (start_class, end_class) in enumerate(class_ranges):
+        mask = (targets >= start_class) & (targets <= end_class)
+        expert_indices[mask] = i
+    
     return expert_indices

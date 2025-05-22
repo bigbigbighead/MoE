@@ -53,7 +53,7 @@ class SpecializedExpert(nn.Module):
             nn.Linear(feat_dim, 256),
             nn.ReLU(),
             nn.Dropout(self.dropout_rate),  # 添加dropout
-            nn.Linear(256, 200)
+            nn.Linear(256, self.num_classes)
         )
 
     def forward(self, x):
@@ -98,30 +98,38 @@ class MoE4Model(nn.Module):
         # 提取特征
         feat = self.backbone(x)
 
-        # 获取每个专家的输出
+        # 创建一个全零的输出张量，大小为 [batch_size, total_classes]
+        batch_size = x.size(0)
+        combined_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
+
+        # 获取每个专家的输出并拼接
         expert_outputs = []
-        for expert in self.experts:
-            expert_output = expert(feat)
+        for i, expert in enumerate(self.experts):
+            start_class, end_class = self.class_ranges[i]
+            # 获取专家的输出
+            expert_output = expert(feat)  # [batch_size, expert_num_classes]
             expert_outputs.append(expert_output)
+            # 将专家输出放入对应的位置
+            combined_logits[:, start_class:end_class + 1] = expert_output
 
-        # 将所有专家输出相加
-        combined_logits = torch.zeros_like(expert_outputs[0])
-        for output in expert_outputs:
-            combined_logits += output
-
-        # 返回特征和合并后的logits
+        # 返回特征、各专家输出和拼接后的结果
         return feat, expert_outputs, combined_logits
 
     def inference(self, x):
-        """推理模式：直接将所有专家的输出相加"""
+        """推理模式：将每个专家对应类别范围的输出拼接成完整的分类结果"""
         feat = self.backbone(x)
 
-        # 获取每个专家的输出并相加
-        combined_logits = torch.zeros(x.size(0), self.total_classes, device=x.device)
+        # 创建一个全零的输出张量，大小为 [batch_size, total_classes]
+        batch_size = x.size(0)
+        combined_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
 
-        for expert in self.experts:
-            expert_output = expert(feat)
-            combined_logits += expert_output
+        # 每个专家只负责自己范围内的类别
+        for i, expert in enumerate(self.experts):
+            start_class, end_class = self.class_ranges[i]
+            # 获取专家的输出
+            expert_output = expert(feat)  # [batch_size, expert_num_classes]
+            # 将专家输出放入对应的位置
+            combined_logits[:, start_class:end_class + 1] = expert_output
 
         return combined_logits
 

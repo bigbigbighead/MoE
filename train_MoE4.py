@@ -16,7 +16,7 @@ from validate_model import validate_expert, validate_full_model, validate_router
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/12"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/18"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -31,12 +31,10 @@ LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 
 # 优化超参数
 BATCH_SIZE = 2048  # 批次大小
-EPOCHS_STAGE1 = 2  # 第一阶段训练轮数
+EPOCHS_STAGE1 = 10  # 第一阶段训练轮数
 LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
-CLASS_RANGES = [(0, 9), (10, 19), (20, 29), (30, 39), (40, 49), (50, 59), (60, 69), (70, 79), (80, 89), (90, 99),
-                (100, 109), (110, 119), (120, 129), (130, 139), (140, 149), (150, 159), (160, 169), (170, 179),
-                (180, 189), (190, 199)]
+CLASS_RANGES = [(0, 5), (6, 26), (27, 199)]
 NUM_EXPERTS = 3  # MoE专家头数量
 NUM_WORKERS = 2  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
@@ -242,9 +240,42 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
     return model
 
 
-# 评估整体模型
+# 修改验证函数，确保与新的推理逻辑一致
+def validate_expert(model, val_loader, criterion, expert_idx, device):
+    """验证单个专家的性能"""
+    model.eval()
+    val_loss = 0
+    correct = 0
+    total = 0
+
+    start_class, end_class = model.module.class_ranges[expert_idx] if hasattr(model, 'module') else model.class_ranges[
+        expert_idx]
+
+    with torch.no_grad():
+        for inputs, targets in val_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+
+            # 获取特征
+            features = model.module.backbone(inputs) if hasattr(model, 'module') else model.backbone(inputs)
+
+            # 获取专家输出
+            outputs = model.module.experts[expert_idx](features) if hasattr(model, 'module') else model.experts[
+                expert_idx](features)
+
+            # 计算损失
+            loss = criterion(outputs, targets)
+
+            val_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+
+    return val_loss / len(val_loader), correct / total
+
+
+# 修改整体模型的评估函数，确保使用新的推理逻辑
 def evaluate_ensemble_model(model, val_loader, test_loader, device):
-    """评估整体模型性能，直接将所有专家输出相加"""
+    """评估整体模型性能，使用新的推理逻辑（拼接专家输出）"""
     log_message("开始评估整体模型性能...")
     model.eval()
 
@@ -260,7 +291,7 @@ def evaluate_ensemble_model(model, val_loader, test_loader, device):
         for inputs, targets in val_loader:
             inputs, targets = inputs.to(device), targets.to(device)
 
-            # 获取模型预测
+            # 获取模型预测（使用inference方法确保用拼接而非相加）
             logits = model.inference(inputs)
             loss = criterion(logits, targets)
 
