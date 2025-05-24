@@ -8,7 +8,7 @@ from torchvision import datasets, transforms
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/18"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/21"
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -29,7 +29,7 @@ NUM_EXPERTS = 3  # MoE专家头数量
 ROUTING_TYPE = 'hard'  # 路由类型: 'softmax' 或 'hard'
 NUM_WORKERS = 2  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
-PREFETCH_FACTOR = 8  # 增加预取因子
+PREFETCH_FACTOR = 2  # 增加预取因子
 
 # 自动混合精度训练配置
 USE_AMP = True  # 启用自动混合精度训练
@@ -98,41 +98,41 @@ def get_dataloaders(class_ranges, dataset_path=DATASET_PATH):
         test_subset_y = test_y[test_indices] - start_class  # 调整标签使其从0开始
         test_subsets.append(TensorDataset(test_subset_x, test_subset_y))
 
-        # 创建数据加载器
-        train_loaders = []
-        for subset in train_subsets:
-            train_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE, shuffle=True,
-                                            num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                                            prefetch_factor=PREFETCH_FACTOR, persistent_workers=True))
+    # 创建数据加载器
+    train_loaders = []
+    for subset in train_subsets:
+        train_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE, shuffle=True,
+                                        num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                                        prefetch_factor=PREFETCH_FACTOR, persistent_workers=False))
 
-        # 创建验证集加载器
-        val_loaders = []
-        for subset in val_subsets:
-            val_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE * 2, shuffle=False,
-                                          num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                                          prefetch_factor=PREFETCH_FACTOR, persistent_workers=True))
+    # 创建验证集加载器
+    val_loaders = []
+    for subset in val_subsets:
+        val_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE * 2, shuffle=False,
+                                      num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                                      prefetch_factor=PREFETCH_FACTOR, persistent_workers=False))
 
-        # 创建测试集加载器
-        test_loaders = []
-        for subset in test_subsets:
-            test_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE * 2, shuffle=False,
-                                           num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                                           prefetch_factor=PREFETCH_FACTOR, persistent_workers=True))
-
-        # 完整数据集的加载器
-        full_train_dataset = TensorDataset(train_x, train_y)
-        full_train_loader = DataLoader(full_train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+    # 创建测试集加载器
+    test_loaders = []
+    for subset in test_subsets:
+        test_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE * 2, shuffle=False,
                                        num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                                       prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
+                                       prefetch_factor=PREFETCH_FACTOR, persistent_workers=False))
 
-        val_dataset = TensorDataset(val_x, val_y)
-        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
-                                num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                                prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
+    # 完整数据集的加载器
+    full_train_dataset = TensorDataset(train_x, train_y)
+    full_train_loader = DataLoader(full_train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                                   num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                                   prefetch_factor=PREFETCH_FACTOR, persistent_workers=False)
 
-        test_dataset = TensorDataset(test_x, test_y)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
-                                 num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
-                                 prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
+    val_dataset = TensorDataset(val_x, val_y)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
+                            num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                            prefetch_factor=PREFETCH_FACTOR, persistent_workers=False)
+
+    test_dataset = TensorDataset(test_x, test_y)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE * 2, shuffle=False,
+                             num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                             prefetch_factor=PREFETCH_FACTOR, persistent_workers=False)
 
     return train_loaders, val_loaders, test_loaders, full_train_loader, val_loader, test_loader

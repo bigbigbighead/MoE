@@ -1,10 +1,12 @@
 import os
+import sys
 import time
 import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import glob
+import gc
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import autocast, GradScaler
 from models.MoE import MoE4Model
@@ -12,11 +14,15 @@ from models.ResNet import resnet18
 
 from utils.data_loading_mine import log_message, load_data, get_dataloaders, ROUTING_TYPE
 from utils.load_model import load_pretrained_weights, load_checkpoint
-from validate_model import validate_expert, validate_full_model, validate_router_accuracy, get_expert_indices
+from utils.loss_functions import compute_specialized_loss, combine_expert_outputs
+from utils.visualization import log_metrics_to_tensorboard, plot_loss_curves, plot_accuracy_curves, \
+    plot_expert_logits_histograms
+from validate_model import validate_expert, validate_full_model, validate_router_accuracy, get_expert_indices, \
+    compare_model_parameters
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/18"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/21"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -32,22 +38,28 @@ LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 # 优化超参数
 BATCH_SIZE = 2048  # 批次大小
 EPOCHS_STAGE1 = 10  # 第一阶段训练轮数
+EPOCHS_EXPERT0 = 2
+EPOCH_EXPERTS = 3
 LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
-CLASS_RANGES = [(0, 5), (6, 26), (27, 199)]
+CLASS_RANGES = [(0, 99), (100, 149), (150, 199)]
 NUM_EXPERTS = 3  # MoE专家头数量
 NUM_WORKERS = 2  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
-PREFETCH_FACTOR = 8  # 增加预取因子
+PREFETCH_FACTOR = 4  # 增加预取因子
 # 自动混合精度训练配置
 USE_AMP = True  # 启动自动混合精度训练
 
 
-# 第一阶段训练：单独训练每个专家
+# 优化训练过程，确保在训练和记录指标时的一致性
 def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume_training=False):
     """
     第一阶段训练：分别训练每个专家
-    修改后的逻辑：外层循环是专家索引，内层循环是每个专家的完整训练周期
+    
+    按照Model design.md:
+    - 每个专家有自己的目标类范围
+    - 每个专家只会接收标签属于自己目标类的样本来进行训练
+    - 专家的损失函数包含分类损失和正则化项
     """
     log_message(f"开始专家训练...")
     writer = SummaryWriter(os.path.join(RESULTS_PATH, 'logs', 'stage1'))
@@ -61,13 +73,11 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
     # 创建混合精度训练的scaler
     scaler = GradScaler() if USE_AMP else None
 
-    # 损失函数
-    criterion = nn.CrossEntropyLoss()
-
     # 外层循环：每个专家
     for expert_idx in range(len(model.experts)):
         log_message(f"===== 开始训练专家 {expert_idx + 1}/{len(model.experts)} =====")
         start_class, end_class = model.class_ranges[expert_idx]
+        log_message(f"专家{expert_idx}负责类别范围: [{start_class}, {end_class}]")
 
         # 只优化当前专家的参数
         optimizer = optim.Adam(model.experts[expert_idx].parameters(), lr=LEARNING_RATE_STAGE1)
@@ -77,34 +87,50 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
         best_val_acc = 0.0
 
         if resume_training:
-            expert_checkpoint_path = os.path.join(RESULTS_PATH, 'param', f'stage1_expert{expert_idx}_latest.pth')
-            if os.path.exists(expert_checkpoint_path):
-                checkpoint = torch.load(expert_checkpoint_path)
-                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                    # 只加载当前专家的参数
-                    model_dict = model.state_dict()
-                    expert_dict = {k: v for k, v in checkpoint['model_state_dict'].items()
-                                   if k.startswith(f'experts.{expert_idx}') or k.startswith(
-                            f'module.experts.{expert_idx}')}
-                    model_dict.update(expert_dict)
-                    model.load_state_dict(model_dict)
+            final_model_path = os.path.join(RESULTS_PATH, 'param', 'final_model.pth')
+            if start_epoch != 0:
+                checkpoint = torch.load(final_model_path)
+                model.load_state_dict(checkpoint['model_state_dict'])
+                log_message(f"成功加载final完整模型参数：{final_model_path}")
+            else:
+                expert_checkpoint_path = os.path.join(RESULTS_PATH, 'param', f'stage1_expert{expert_idx}_latest.pth')
+                if os.path.exists(expert_checkpoint_path):
+                    checkpoint = torch.load(expert_checkpoint_path)
+                    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                        # 只加载当前专家的参数
+                        model_dict = model.state_dict()
+                        expert_dict = {k: v for k, v in checkpoint['model_state_dict'].items()
+                                       if k.startswith(f'experts.{expert_idx}') or k.startswith(
+                                f'module.experts.{expert_idx}')}
+                        model_dict.update(expert_dict)
+                        model.load_state_dict(model_dict)
 
-                    if 'optimizer_state_dict' in checkpoint:
-                        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                        if 'optimizer_state_dict' in checkpoint:
+                            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-                    if 'epoch' in checkpoint:
-                        start_epoch = checkpoint['epoch'] + 1
+                        if 'epoch' in checkpoint:
+                            start_epoch = checkpoint['epoch'] + 1
 
-                    if 'best_val_acc' in checkpoint:
-                        best_val_acc = checkpoint['best_val_acc']
+                        if 'best_val_acc' in checkpoint:
+                            best_val_acc = checkpoint['best_val_acc']
 
-                    log_message(
-                        f"已加载专家{expert_idx}的检查点，从第{start_epoch}轮继续训练，当前最佳验证准确率: {best_val_acc:.2f}%")
+                        log_message(
+                            f"已加载专家{expert_idx}的检查点，从第{start_epoch}轮继续训练，当前最佳验证准确率: {best_val_acc:.2f}")
 
-        # 获取当前专家的数据加载器
+        # 获取当前专家的数据加载器 - train_loaders[expert_idx]只包含该专家负责类别的样本
         train_loader = train_loaders[expert_idx]
         val_loader_expert = val_loaders[expert_idx]
         test_loader_expert = test_loaders[expert_idx]
+
+        # 记录训练历史
+        train_losses = []
+        val_losses = []
+        train_accuracies = []
+        val_accuracies = []
+        if expert_idx == 0:
+            EPOCHS_STAGE1 = EPOCHS_EXPERT0
+        else:
+            EPOCHS_STAGE1 = EPOCH_EXPERTS
         # 内层循环：该专家的完整训练周期
         for epoch in range(start_epoch, EPOCHS_STAGE1):
             epoch_start_time = time.time()
@@ -112,7 +138,9 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
             model.train()
 
             # 训练一个epoch
-            epoch_loss = 0
+            epoch_cls_loss = 0
+            epoch_reg_loss = 0
+            epoch_total_loss = 0
             correct = 0
             total = 0
             batch_train_time = 0
@@ -120,6 +148,10 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
             for batch_idx, (inputs, targets) in enumerate(train_loader):
                 batch_start_time = time.time()
                 inputs, targets = inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+
+                # 确保targets是相对于当前专家负责范围的
+                # train_loaders已经确保这一点，这里只是进行确认
+                # 注意：targets值已经是相对于专家范围的，例如专家1负责[100-149]，则targets值范围为[0-49]
 
                 optimizer.zero_grad(set_to_none=True)  # 更快地重置梯度
 
@@ -130,11 +162,11 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
                         features = model.backbone(inputs)
                         outputs = model.experts[expert_idx](features)
 
-                        # 计算损失
-                        loss = criterion(outputs, targets)
+                        # 使用损失函数计算 - 包含分类损失和正则化项
+                        cls_loss, reg_loss, total_loss = model.compute_loss(outputs, targets, expert_idx)
 
                     # 使用scaler进行反向传播和优化
-                    scaler.scale(loss).backward()
+                    scaler.scale(total_loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
                 else:
@@ -142,46 +174,77 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
                     features = model.backbone(inputs)
                     outputs = model.experts[expert_idx](features)
 
-                    # 计算损失
-                    loss = criterion(outputs, targets)
+                    # 使用损失函数计算
+                    cls_loss, reg_loss, total_loss = model.compute_loss(outputs, targets, expert_idx)
 
                     # 反向传播与优化
-                    loss.backward()
+                    total_loss.backward()
                     optimizer.step()
 
                 batch_time_taken = time.time() - batch_start_time
                 batch_train_time += batch_time_taken
 
                 # 统计
-                epoch_loss += loss.item()
+                epoch_cls_loss += cls_loss.item()
+                epoch_reg_loss += reg_loss.item()
+                epoch_total_loss += total_loss.item()
                 _, predicted = outputs.max(1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
 
             # 记录每个专家的训练损失和准确率
-            avg_loss = epoch_loss / len(train_loader)
-            accuracy = correct / total
+            avg_cls_loss = epoch_cls_loss / len(train_loader) if len(train_loader) > 0 else 0
+            avg_reg_loss = epoch_reg_loss / len(train_loader) if len(train_loader) > 0 else 0
+            avg_total_loss = epoch_total_loss / len(train_loader) if len(train_loader) > 0 else 0
+            accuracy = correct / total if total > 0 else 0
             epoch_time_taken = time.time() - epoch_start_time
-            writer.add_scalar(f'expert{expert_idx}/train_loss', avg_loss, epoch)
-            writer.add_scalar(f'expert{expert_idx}/train_accuracy', accuracy, epoch)
+
+            train_losses.append(avg_total_loss)
+            train_accuracies.append(accuracy)
+
+            # 记录TensorBoard指标
+            metrics = {
+                'cls_loss': avg_cls_loss,
+                'reg_loss': avg_reg_loss,
+                'total_loss': avg_total_loss,
+                'accuracy': accuracy
+            }
+            log_metrics_to_tensorboard(writer, metrics, epoch, prefix=f'expert{expert_idx}/train_')
+
             log_message(
-                f"  专家{expert_idx} - 训练损失: {avg_loss:.4f}, 准确率: {accuracy:.4f}, 耗时: {epoch_time_taken:.2f}s (Avg Batch: {batch_train_time / len(train_loader):.2f}s)")
+                f"  专家{expert_idx} - 训练损失: 分类={avg_cls_loss:.4f}, 正则={avg_reg_loss:.4f}, 总计={avg_total_loss:.4f}, "
+                f"准确率: {accuracy:.4f}, 耗时: {epoch_time_taken:.2f}s")
 
             # 使用专家对应的验证集验证当前专家的性能
             valid_start_time = time.time()
-            val_loss, val_accuracy = validate_expert(model, val_loader_expert, criterion, expert_idx, device)
+            val_loss, val_accuracy = validate_expert(model, val_loader_expert, None, expert_idx, device)
             valid_end_time = time.time()
-            writer.add_scalar(f'expert{expert_idx}/val_loss', val_loss, epoch)
-            writer.add_scalar(f'expert{expert_idx}/val_accuracy', val_accuracy, epoch)
+
+            val_losses.append(val_loss)
+            val_accuracies.append(val_accuracy)
+
+            # 记录验证集指标
+            val_metrics = {
+                'loss': val_loss,
+                'accuracy': val_accuracy
+            }
+            log_metrics_to_tensorboard(writer, val_metrics, epoch, prefix=f'expert{expert_idx}/val_')
+
             log_message(
                 f"  专家{expert_idx} - 验证损失: {val_loss:.4f}, 准确率: {val_accuracy:.4f}, 耗时: {valid_end_time - valid_start_time:.2f}s")
 
             # 使用专家对应的测试集测试当前专家的性能
             test_start_time = time.time()
-            test_loss, test_accuracy = validate_expert(model, test_loader_expert, criterion, expert_idx, device)
+            test_loss, test_accuracy = validate_expert(model, test_loader_expert, None, expert_idx, device)
             test_end_time = time.time()
-            writer.add_scalar(f'expert{expert_idx}/test_loss', test_loss, epoch)
-            writer.add_scalar(f'expert{expert_idx}/test_accuracy', test_accuracy, epoch)
+
+            # 记录测试集指标
+            test_metrics = {
+                'loss': test_loss,
+                'accuracy': test_accuracy
+            }
+            log_metrics_to_tensorboard(writer, test_metrics, epoch, prefix=f'expert{expert_idx}/test_')
+
             log_message(
                 f"  专家{expert_idx} - 测试损失: {test_loss:.4f}, 准确率: {test_accuracy:.4f}, 耗时: {test_end_time - test_start_time:.2f}s")
 
@@ -224,8 +287,17 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
                 }, epoch_checkpoint_path)
                 log_message(f"  已保存专家{expert_idx}的Epoch {epoch + 1}检查点")
 
+        # 绘制损失和准确率曲线
+        loss_curve_path = os.path.join(RESULTS_PATH, 'logs', f'expert{expert_idx}_loss_curve.png')
+        acc_curve_path = os.path.join(RESULTS_PATH, 'logs', f'expert{expert_idx}_accuracy_curve.png')
+        plot_loss_curves(train_losses, val_losses, loss_curve_path)
+        plot_accuracy_curves(train_accuracies, val_accuracies, acc_curve_path)
+        log_message(f"  已保存专家{expert_idx}的损失和准确率曲线")
+
         # 关闭该专家的数据加载器
         del train_loader, val_loader_expert, test_loader_expert
+        torch.cuda.empty_cache()
+        gc.collect()
         # 该专家训练完成
         log_message(f"专家{expert_idx}训练完成，最佳验证准确率: {best_val_acc:.4f}")
 
@@ -233,6 +305,8 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
     final_checkpoint_path = os.path.join(RESULTS_PATH, 'param', 'final_model.pth')
     torch.save({
         'model_state_dict': model.state_dict(),
+        'class_ranges': model.class_ranges,
+        'total_classes': model.total_classes
     }, final_checkpoint_path)
     log_message(f"所有专家训练完成，完整模型已保存到 {final_checkpoint_path}")
     writer.close()
@@ -240,98 +314,151 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
     return model
 
 
-# 修改验证函数，确保与新的推理逻辑一致
+# 验证专家函数，确保正确处理相对类别标签
 def validate_expert(model, val_loader, criterion, expert_idx, device):
-    """验证单个专家的性能"""
+    """
+    验证单个专家的性能
+    注意：
+    1. 专家的输入标签已经是相对于该专家负责类别范围的
+    2. 按照Model design.md，损失函数包含分类损失和正则化项
+    """
     model.eval()
     val_loss = 0
+    cls_loss_sum = 0
+    reg_loss_sum = 0
     correct = 0
     total = 0
 
-    start_class, end_class = model.module.class_ranges[expert_idx] if hasattr(model, 'module') else model.class_ranges[
-        expert_idx]
+    # 获取专家的类别范围
+    if hasattr(model, 'module'):
+        start_class, end_class = model.module.class_ranges[expert_idx]
+    else:
+        start_class, end_class = model.class_ranges[expert_idx]
 
     with torch.no_grad():
         for inputs, targets in val_loader:
             inputs, targets = inputs.to(device), targets.to(device)
 
-            # 获取特征
-            features = model.module.backbone(inputs) if hasattr(model, 'module') else model.backbone(inputs)
+            # 获取特征和专家输出
+            if hasattr(model, 'module'):
+                features = model.module.backbone(inputs)
+                outputs = model.module.experts[expert_idx](features)
 
-            # 获取专家输出
-            outputs = model.module.experts[expert_idx](features) if hasattr(model, 'module') else model.experts[
-                expert_idx](features)
+                # 计算损失 - 使用model内部的compute_loss方法
+                cls_loss, reg_loss, total_loss = model.module.compute_loss(outputs, targets, expert_idx)
+            else:
+                features = model.backbone(inputs)
+                outputs = model.experts[expert_idx](features)
 
-            # 计算损失
-            loss = criterion(outputs, targets)
+                # 计算损失 - 使用model内部的compute_loss方法
+                cls_loss, reg_loss, total_loss = model.compute_loss(outputs, targets, expert_idx)
 
-            val_loss += loss.item()
+            # 累积损失
+            val_loss += total_loss.item()
+            cls_loss_sum += cls_loss.item()
+            reg_loss_sum += reg_loss.item()
+
+            # 计算准确率
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
 
-    return val_loss / len(val_loader), correct / total
+    # 计算平均损失和准确率
+    avg_val_loss = val_loss / len(val_loader) if len(val_loader) > 0 else 0
+    avg_cls_loss = cls_loss_sum / len(val_loader) if len(val_loader) > 0 else 0
+    avg_reg_loss = reg_loss_sum / len(val_loader) if len(val_loader) > 0 else 0
+    accuracy = correct / total if total > 0 else 0
+
+    return avg_val_loss, accuracy
 
 
-# 修改整体模型的评估函数，确保使用新的推理逻辑
-def evaluate_ensemble_model(model, val_loader, test_loader, device):
-    """评估整体模型性能，使用新的推理逻辑（拼接专家输出）"""
+# 优化评估函数，确保正确使用推理方法
+def evaluate_ensemble_model(model, val_loader, test_loader, device, FLAG=True):
+    """
+    评估整体模型性能
+    采用Model design.md中定义的推理输出方式：直接组合各专家的输出
+    """
     log_message("开始评估整体模型性能...")
-    model.eval()
 
     criterion = nn.CrossEntropyLoss()
-
-    # 评估验证集性能
+    # 评估验证集
     val_start_time = time.time()
-    val_loss = 0.0
-    val_correct = 0
-    val_total = 0
-
-    with torch.no_grad():
-        for inputs, targets in val_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-
-            # 获取模型预测（使用inference方法确保用拼接而非相加）
-            logits = model.inference(inputs)
-            loss = criterion(logits, targets)
-
-            val_loss += loss.item()
-            _, predicted = logits.max(1)
-            val_total += targets.size(0)
-            val_correct += predicted.eq(targets).sum().item()
-
-    val_accuracy = val_correct / val_total
-    val_loss = val_loss / len(val_loader)
+    val_loss, val_accuracy = validate_full_model(model, val_loader, criterion, device, FLAG)
     val_time = time.time() - val_start_time
-
     log_message(f"验证集性能 - 损失: {val_loss:.4f}, 准确率: {val_accuracy:.4f}, 耗时: {val_time:.2f}s")
 
-    # 评估测试集性能
+    # 评估测试集
     test_start_time = time.time()
-    test_loss = 0.0
-    test_correct = 0
-    test_total = 0
-
-    with torch.no_grad():
-        for inputs, targets in test_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-
-            # 获取模型预测
-            logits = model.inference(inputs)
-            loss = criterion(logits, targets)
-
-            test_loss += loss.item()
-            _, predicted = logits.max(1)
-            test_total += targets.size(0)
-            test_correct += predicted.eq(targets).sum().item()
-
-    test_accuracy = test_correct / test_total
-    test_loss = test_loss / len(test_loader)
+    test_loss, test_accuracy = validate_full_model(model, test_loader, criterion, device, FLAG)
     test_time = time.time() - test_start_time
-
     log_message(f"测试集性能 - 损失: {test_loss:.4f}, 准确率: {test_accuracy:.4f}, 耗时: {test_time:.2f}s")
 
     return val_accuracy, test_accuracy
+
+
+def ensure_model(model):
+    """确保模型结构正确"""
+    """检查模型保存的结果和模型本身是否相同"""
+    latest_model = MoE4Model(
+        total_classes=NUM_CLASSES,
+        class_ranges=CLASS_RANGES,
+        input_channels=input_channels,
+        input_height=input_height,
+        input_width=input_width
+    )
+    final_model = MoE4Model(
+        total_classes=NUM_CLASSES,
+        class_ranges=CLASS_RANGES,
+        input_channels=input_channels,
+        input_height=input_height,
+        input_width=input_width
+    )
+    latest_model.to(device)
+    final_model.to(device)
+    latest_model = load_pretrained_weights(latest_model, PRETRAINED_RESNET18_PATH)
+    for expert_idx in range(len(model.experts)):
+        expert_checkpoint_path = os.path.join(RESULTS_PATH, 'param', f'stage1_expert{expert_idx}_latest.pth')
+        if os.path.exists(expert_checkpoint_path):
+            checkpoint = torch.load(expert_checkpoint_path)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                # 只加载当前专家的参数
+                model_dict = latest_model.state_dict()
+                expert_dict = {k: v for k, v in checkpoint['model_state_dict'].items()
+                               if k.startswith(f'experts.{expert_idx}') or k.startswith(
+                        f'module.experts.{expert_idx}')}
+                model_dict.update(expert_dict)
+                latest_model.load_state_dict(model_dict)
+
+                # if 'optimizer_state_dict' in checkpoint:
+                #     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+                if 'epoch' in checkpoint:
+                    start_epoch = checkpoint['epoch'] + 1
+
+                if 'best_val_acc' in checkpoint:
+                    best_val_acc = checkpoint['best_val_acc']
+
+                log_message(
+                    f"已加载专家{expert_idx}的检查点，从第{start_epoch}轮继续训练，当前最佳验证准确率: {best_val_acc:.2f}%")
+
+    final_model_path = os.path.join(RESULTS_PATH, 'param', 'final_model.pth')
+    if os.path.exists(final_model_path):
+        checkpoint = torch.load(final_model_path, map_location='cpu')
+        final_model.load_state_dict(checkpoint['model_state_dict'])
+        log_message("已加载完整final_model模型参数")
+    else:
+        log_message("未找到完整模型参数，无法验证模型一致性")
+
+    # 比较模型参数
+    if compare_model_parameters(model, latest_model):
+        log_message("latest模型参数一致性验证通过")
+    else:
+        log_message("latest模型参数一致性验证失败")
+    if compare_model_parameters(model, final_model):
+        log_message("final模型参数一致性验证通过")
+    else:
+        log_message("final模型参数一致性验证失败")
+    return latest_model, final_model
 
 
 if __name__ == "__main__":
@@ -404,9 +531,17 @@ if __name__ == "__main__":
 
     # 评估整体模型
     val_accuracy, test_accuracy = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device)
-
+    # 检查模型保存效果
+    latest_model, final_model = ensure_model(model)
+    log_message("=== 模型参数一致性验证 ===")
+    log_message("Latest Model:")
+    val_accuracy, test_accuracy = evaluate_ensemble_model(latest_model, full_val_loader, full_test_loader, device,
+                                                          False)
+    log_message("Final Model:")
+    val_accuracy, test_accuracy = evaluate_ensemble_model(final_model, full_val_loader, full_test_loader, device, False)
     # 记录最终结果
     log_message(f"训练完成！")
     log_message(f"最终验证集准确率: {val_accuracy:.4f}")
     log_message(f"最终测试集准确率: {test_accuracy:.4f}")
     log_message(f"=== 训练结束于 {datetime.datetime.now().strftime('%Y.%m.%d_%H:%M:%S')} ===")
+    sys.exit(0)

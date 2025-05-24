@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from models.ResNet import ResNetBlock, ResNetBackbone, resnet18_backbone
+from utils.loss_functions import compute_specialized_loss
 
 
 class MoE4Router(nn.Module):
@@ -53,7 +55,7 @@ class SpecializedExpert(nn.Module):
             nn.Linear(feat_dim, 256),
             nn.ReLU(),
             nn.Dropout(self.dropout_rate),  # 添加dropout
-            nn.Linear(256, self.num_classes)
+            nn.Linear(256, 200)
         )
 
     def forward(self, x):
@@ -76,10 +78,8 @@ class MoE4Model(nn.Module):
         self.total_classes = total_classes
         self.dropout_rate = dropout_rate
 
-        # ResNet18 backbone
-        self.backbone = ResNetBackbone(
-            block=ResNetBlock,
-            layers=[2, 2, 2, 2],  # ResNet18配置
+        # ResNet18 backbone - 使用从ResNet.py导入的组件
+        self.backbone = resnet18_backbone(
             input_channels=input_channels,
             input_height=input_height,
             input_width=input_width,
@@ -94,6 +94,14 @@ class MoE4Model(nn.Module):
             expert = SpecializedExpert(feat_dim, class_range, dropout_rate=dropout_rate)
             self.experts.append(expert)
 
+        # 为每个类别构建负责的专家索引
+        self.class_to_experts = {}
+        for c in range(total_classes):
+            self.class_to_experts[c] = []
+            for i, (start, end) in enumerate(self.class_ranges):
+                if start <= c <= end:
+                    self.class_to_experts[c].append(i)
+
     def forward(self, x):
         # 提取特征
         feat = self.backbone(x)
@@ -102,153 +110,94 @@ class MoE4Model(nn.Module):
         batch_size = x.size(0)
         combined_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
 
-        # 获取每个专家的输出并拼接
+        # 获取每个专家的输出
         expert_outputs = []
         for i, expert in enumerate(self.experts):
-            start_class, end_class = self.class_ranges[i]
             # 获取专家的输出
             expert_output = expert(feat)  # [batch_size, expert_num_classes]
             expert_outputs.append(expert_output)
-            # 将专家输出放入对应的位置
-            combined_logits[:, start_class:end_class + 1] = expert_output
 
-        # 返回特征、各专家输出和拼接后的结果
+            # 直接将每个专家的输出相加到combined_logits
+            combined_logits += expert_output
+
+        # 返回特征、各专家输出和相加后的结果
         return feat, expert_outputs, combined_logits
 
     def inference(self, x):
-        """推理模式：将每个专家对应类别范围的输出拼接成完整的分类结果"""
+        """
+        推理模式：根据Model design.md中的公式计算每个类别的输出logits
+        对于每个类别，输出logits为所有专家的输出直接相加
+        
+        在模型设计中，专家的输出logits直接相加即可
+        """
         feat = self.backbone(x)
-
-        # 创建一个全零的输出张量，大小为 [batch_size, total_classes]
         batch_size = x.size(0)
+
+        # 创建一个全零的输出张量
         combined_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
 
-        # 每个专家只负责自己范围内的类别
+        # 获取每个专家的输出并直接相加
         for i, expert in enumerate(self.experts):
-            start_class, end_class = self.class_ranges[i]
-            # 获取专家的输出
-            expert_output = expert(feat)  # [batch_size, expert_num_classes]
-            # 将专家输出放入对应的位置
-            combined_logits[:, start_class:end_class + 1] = expert_output
+            expert_output = expert(feat)
+            combined_logits += expert_output
 
         return combined_logits
+
+    def compute_loss(self, logits, targets, expert_idx):
+        """
+        计算专家的损失函数，严格按照Model design.md的设计
+
+        按照设计文档定义：
+        L_cls = 交叉熵损失 (目标类别)
+        L_com = 干扰类别logits的L2范数平方和
+        L = L_cls + L_com
+
+        Args:
+            logits: 专家输出的logits，维度为 [batch_size, expert_num_classes]
+            targets: 相对于该专家负责类别范围的标签，维度为 [batch_size]
+            expert_idx: 专家索引
+
+        Returns:
+            cls_loss: 分类损失 (L_cls)
+            reg_loss: 正则化损失 (L_com)
+            total_loss: 总损失 (L = L_cls + L_com)
+        """
+        # 1. 分类损失 (L_cls) - 交叉熵损失
+        criterion = nn.CrossEntropyLoss()
+        cls_loss = criterion(logits, targets)
+
+        # 2. 正则化损失 (L_com)
+        # 根据设计文档: L_com^i(B_i) = sum_{c_j∈C̃_i}^C ||z_i^{c_j}||^2
+        # 获取当前专家负责的类别范围
+        start_class, end_class = self.class_ranges[expert_idx]
+
+        # 创建目标类别的one-hot编码掩码，这个掩码表示专家负责的类别范围
+        # 首先创建一个全零矩阵
+        target_mask = torch.zeros(logits.size(0), self.total_classes, device=logits.device)
+
+        # 然后将专家负责的类别范围设置为1
+        target_mask[:, start_class:end_class + 1] = 1.0
+
+        # 计算干扰类别的掩码 (非目标类别)
+        interference_mask = 1.0 - target_mask
+
+        # 应用掩码，仅保留干扰类别的logits
+        interference_logits = logits * interference_mask
+
+        # 计算每个样本干扰类别logits的L2范数平方和
+        # 先计算每个样本的L2范数，再平方，最后求平均
+        reg_loss = torch.norm(interference_logits, dim=1).pow(2).mean()
+
+        # 3. 总损失 = 分类损失 + 正则化损失
+        total_loss = cls_loss + reg_loss
+
+        return cls_loss, reg_loss, total_loss
 
     def predict(self, x):
         """返回预测的类别"""
         logits = self.inference(x)
         _, predicted = torch.max(logits, 1)
         return predicted
-
-
-class ResNetBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1, downsample=None, dropout_rate=0.2):
-        super(ResNetBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.dropout1 = nn.Dropout(dropout_rate)  # 添加dropout
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        self.dropout2 = nn.Dropout(dropout_rate)  # 添加dropout
-        self.downsample = downsample
-
-    def forward(self, x):
-        identity = x
-        if self.downsample is not None:
-            identity = self.downsample(x)
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = F.relu(out)
-        out = self.dropout1(out)  # 第一个激活函数后应用dropout
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.dropout2(out)  # 第二个激活函数前应用dropout
-        out += identity
-        out = F.relu(out)
-        return out
-
-
-# 实现可自定义层数的ResNetBackbone
-class ResNetBackbone(nn.Module):
-    def __init__(self, block=ResNetBlock, layers=None, input_channels=1, input_height=1, input_width=1024,
-                 dropout_rate=0.2):
-        """
-        可自定义每一层块数的ResNet骨干网络
-
-        Args:
-            block: 使用的残差块类型
-            layers: 每一层的块数列表，例如[2,2,2,2]表示ResNet18, [3,4,6,3]表示ResNet34
-            input_channels: 输入通道数
-            input_height: 输入高度
-            input_width: 输入宽度
-            dropout_rate: dropout比率
-        """
-        super(ResNetBackbone, self).__init__()
-        if layers is None:
-            layers = [2, 2, 2, 2]
-        self.in_channels = 64
-        self.dropout_rate = dropout_rate
-
-        # 根据输入尺寸调整初始卷积层
-        if input_height == 1:
-            # 使用1x7的卷积核，不改变高度维度
-            self.conv1 = nn.Conv2d(input_channels, 64, kernel_size=(1, 7), stride=(1, 2), padding=(0, 3), bias=False)
-        else:
-            # 原始7x7卷积
-            self.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-        self.dropout = nn.Dropout(dropout_rate)  # 添加dropout层
-
-        # 调整池化层以适应可能的小高度
-        if input_height == 1:
-            self.maxpool = nn.MaxPool2d(kernel_size=(1, 3), stride=(1, 2), padding=(0, 1))
-        else:
-            self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-        # 创建网络的四个层，每层的块数由layers参数决定
-        self.layer1 = self._make_layer(block, 64, layers[0])
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
-
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-
-        # 输出特征维度是最后一层的通道数
-        self.feat_dim = 512
-
-    def _make_layer(self, block, out_channels, blocks, stride=1):
-        downsample = None
-        if stride != 1 or self.in_channels != out_channels:
-            downsample = nn.Sequential(
-                nn.Conv2d(self.in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels),
-            )
-
-        layers = []
-        layers.append(block(self.in_channels, out_channels, stride, downsample, dropout_rate=self.dropout_rate))
-        self.in_channels = out_channels
-        for _ in range(1, blocks):
-            layers.append(block(out_channels, out_channels, dropout_rate=self.dropout_rate))
-
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.dropout(x)  # 添加dropout
-        x = self.maxpool(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        return x
 
 
 class Router(nn.Module):
@@ -280,10 +229,8 @@ class MoEResNet18(nn.Module):
                  input_width=1024, dropout_rate=0.2):
         super().__init__()
 
-        # 使用我们更灵活的ResNetBackbone，默认配置为ResNet18
-        self.backbone = ResNetBackbone(
-            block=ResNetBlock,
-            layers=[2, 2, 2, 2],  # ResNet18的配置
+        # 使用从ResNet.py导入的ResNetBackbone组件
+        self.backbone = resnet18_backbone(
             input_channels=input_channels,
             input_height=input_height,
             input_width=input_width,
