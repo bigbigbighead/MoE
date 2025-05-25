@@ -16,7 +16,7 @@ from validate_model import validate_expert, validate_full_model, validate_router
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/12"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/22"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -31,14 +31,12 @@ LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 
 # 优化超参数
 BATCH_SIZE = 2048  # 批次大小
-EPOCHS_STAGE1 = 2  # 第一阶段训练轮数
-EPOCHS_STAGE2 = 100  # 第二阶段训练轮数
+EPOCHS_STAGE1 = 20  # 第一阶段训练轮数
+EPOCHS_STAGE2 = 30  # 第二阶段训练轮数
 LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
 LEARNING_RATE_STAGE2 = 0.0001  # 第二阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
-CLASS_RANGES = [(0, 9), (10, 19), (20, 29), (30, 39), (40, 49), (50, 59), (60, 69), (70, 79), (80, 89), (90, 99),
-                (100, 109), (110, 119), (120, 129), (130, 139), (140, 149), (150, 159), (160, 169), (170, 179),
-                (180, 189), (190, 199)]
+CLASS_RANGES = [(0, 99), (100, 149), (150, 199)]
 NUM_EXPERTS = 3  # MoE专家头数量
 ROUTING_TYPE = 'hard'  # 路由类型: 'softmax' 或 'hard'
 NUM_WORKERS = 2  # 数据加载的worker数量
@@ -93,7 +91,7 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
                                    if k.startswith(f'experts.{expert_idx}') or k.startswith(
                             f'module.experts.{expert_idx}')}
                     model_dict.update(expert_dict)
-                    model.load_state_dict(model_dict)
+                    # model.load_state_dict(model_dict)
 
                     if 'optimizer_state_dict' in checkpoint:
                         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -116,7 +114,7 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
             epoch_start_time = time.time()
             log_message(f"专家{expert_idx} - Epoch {epoch + 1}/{EPOCHS_STAGE1}")
             model.train()
-
+            # model.backbone.eval()
             # 训练一个epoch
             epoch_loss = 0
             correct = 0
@@ -299,7 +297,7 @@ def train_stage2(model, train_loader, val_loader, test_loader, device, resume_tr
         epoch_start_time = time.time()
         log_message(f"第二阶段训练 - Epoch {epoch + 1}/{EPOCHS_STAGE2}")
         model.train()  # 确保模型处于训练模式
-
+        # model.backbone.eval()
         epoch_loss = 0
         correct = 0
         total = 0
@@ -372,14 +370,14 @@ def train_stage2(model, train_loader, val_loader, test_loader, device, resume_tr
         test_accuracy = 0
         val_class_accuracies = [0] * len(model.class_ranges)
         test_class_accuracies = [0] * len(model.class_ranges)
-        # # 每轮结束后评估完整模型性能
-        # val_loss, val_accuracy, val_class_accuracies = validate_full_model(model, val_loader, nn.CrossEntropyLoss(),
-        #                                                                    device, "valid")
-        # writer.add_scalar('val_accuracy', val_accuracy, epoch)
-        #
-        # test_loss, test_accuracy, test_class_accuracies = validate_full_model(model, test_loader, nn.CrossEntropyLoss(),
-        #                                                                       device, "test")
-        # writer.add_scalar('test_accuracy', test_accuracy, epoch)
+        # 每轮结束后评估完整模型性能
+        val_loss, val_accuracy, val_class_accuracies = validate_full_model(model, val_loader, nn.CrossEntropyLoss(),
+                                                                           device, "valid")
+        writer.add_scalar('val_accuracy', val_accuracy, epoch)
+
+        test_loss, test_accuracy, test_class_accuracies = validate_full_model(model, test_loader, nn.CrossEntropyLoss(),
+                                                                              device, "test")
+        writer.add_scalar('test_accuracy', test_accuracy, epoch)
 
         # 记录每个类别区间的准确率
         for i, (start, end) in enumerate(model.class_ranges):
