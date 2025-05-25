@@ -55,7 +55,7 @@ USE_AMP = True  # 启动自动混合精度训练
 def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume_training=False):
     """
     第一阶段训练：分别训练每个专家
-    
+
     按照Model design.md:
     - 每个专家有自己的目标类范围
     - 每个专家只会接收标签属于自己目标类的样本来进行训练
@@ -396,6 +396,90 @@ def evaluate_ensemble_model(model, val_loader, test_loader, device, FLAG=True):
     return val_accuracy, test_accuracy
 
 
+def ensure_model(model):
+    """确保模型结构正确"""
+    """检查模型保存的结果和模型本身是否相同"""
+    latest_all_model = MoE4Model(
+        total_classes=NUM_CLASSES,
+        class_ranges=CLASS_RANGES,
+        input_channels=input_channels,
+        input_height=input_height,
+        input_width=input_width
+    )
+    latest_model = MoE4Model(
+        total_classes=NUM_CLASSES,
+        class_ranges=CLASS_RANGES,
+        input_channels=input_channels,
+        input_height=input_height,
+        input_width=input_width
+    )
+    final_model = MoE4Model(
+        total_classes=NUM_CLASSES,
+        class_ranges=CLASS_RANGES,
+        input_channels=input_channels,
+        input_height=input_height,
+        input_width=input_width
+    )
+
+    latest_all_model.to(device)
+    latest_model.to(device)
+    final_model.to(device)
+    latest_all_model = load_pretrained_weights(latest_all_model, PRETRAINED_RESNET18_PATH)
+    for expert_idx in range(len(model.experts)):
+        expert_checkpoint_path = os.path.join(RESULTS_PATH, 'param', f'stage1_expert{expert_idx}_latest.pth')
+        if os.path.exists(expert_checkpoint_path):
+            checkpoint = torch.load(expert_checkpoint_path)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                # 只加载当前专家的参数
+                model_dict = latest_all_model.state_dict()
+                expert_dict = {k: v for k, v in checkpoint['model_state_dict'].items()
+                               if k.startswith(f'experts.{expert_idx}') or k.startswith(
+                        f'module.experts.{expert_idx}')}
+                model_dict.update(expert_dict)
+                latest_all_model.load_state_dict(model_dict)
+
+                # if 'optimizer_state_dict' in checkpoint:
+                #     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+                if 'epoch' in checkpoint:
+                    start_epoch = checkpoint['epoch'] + 1
+
+                if 'best_val_acc' in checkpoint:
+                    best_val_acc = checkpoint['best_val_acc']
+
+                log_message(
+                    f"已加载专家{expert_idx}的检查点，从第{start_epoch}轮继续训练，当前最佳验证准确率: {best_val_acc:.2f}%")
+    log_message("已加载latest all模型参数")
+
+    latest_model_checkpoint_path = os.path.join(RESULTS_PATH, 'param', 'stage1_expert2_latest.pth')
+    checkpoint = torch.load(latest_model_checkpoint_path)
+    latest_model.load_state_dict(checkpoint['model_state_dict'])
+    log_message("已加载expert 2 latest模型参数")
+
+    final_model_path = os.path.join(RESULTS_PATH, 'param', 'final_model.pth')
+    if os.path.exists(final_model_path):
+        checkpoint = torch.load(final_model_path, map_location='cpu')
+        final_model.load_state_dict(checkpoint['model_state_dict'])
+        log_message("已加载完整final_model模型参数")
+    else:
+        log_message("未找到完整模型参数，无法验证模型一致性")
+
+    # 比较模型参数
+    if compare_model_parameters(model, latest_all_model):
+        log_message("latest all模型参数一致性验证通过")
+    else:
+        log_message("latest all模型参数一致性验证失败")
+    if compare_model_parameters(model, latest_model):
+        log_message("latest模型参数一致性验证通过")
+    else:
+        log_message("latest模型参数一致性验证失败")
+    if compare_model_parameters(model, final_model):
+        log_message("final模型参数一致性验证通过")
+    else:
+        log_message("final模型参数一致性验证失败")
+    return latest_all_model, latest_model, final_model
+
+
 if __name__ == "__main__":
     # 设置NUMA绑定和多线程优化
     if torch.cuda.is_available():
@@ -466,7 +550,17 @@ if __name__ == "__main__":
 
     # 评估整体模型
     val_accuracy, test_accuracy = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device)
-
+    # 检查模型保存效果
+    latest_all_model, latest_model, final_model = ensure_model(model)
+    log_message("=== 模型参数一致性验证 ===")
+    log_message("Latest Model:")
+    val_accuracy, test_accuracy = evaluate_ensemble_model(latest_all_model, full_val_loader, full_test_loader, device,
+                                                          False)
+    log_message("Latest Expert 2 Model:")
+    val_accuracy, test_accuracy = evaluate_ensemble_model(latest_model, full_val_loader, full_test_loader, device,
+                                                          False)
+    log_message("Final Model:")
+    val_accuracy, test_accuracy = evaluate_ensemble_model(final_model, full_val_loader, full_test_loader, device, False)
     # 记录最终结果
     log_message(f"训练完成！")
     log_message(f"最终验证集准确率: {val_accuracy:.4f}")

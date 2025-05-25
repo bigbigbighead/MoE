@@ -8,7 +8,7 @@ from torchvision import datasets, transforms
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/21"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/23"
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
