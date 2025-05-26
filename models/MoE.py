@@ -52,14 +52,19 @@ class SpecializedExpert(nn.Module):
         self.dropout_rate = dropout_rate
         # self.dropout_rate = dropout_rate * self.num_classes / 50
         self.classifier = nn.Sequential(
-            nn.Linear(feat_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_rate),  # 添加dropout
-            nn.Linear(256, 200)
+            nn.Linear(feat_dim, 200)
         )
 
     def forward(self, x):
         return self.classifier(x)
+
+    def get_last_layer_weights(self):
+        """获取专家分类器最后一层的权重"""
+        # 假设最后一层是线性层
+        last_layer = self.classifier[-1]
+        if isinstance(last_layer, nn.Linear):
+            return last_layer.weight
+        return None
 
 
 class MoE4Model(nn.Module):
@@ -126,9 +131,10 @@ class MoE4Model(nn.Module):
     def inference(self, x):
         """
         推理模式：根据Model design.md中的公式计算每个类别的输出logits
-        对于每个类别，输出logits为所有专家的输出直接相加
+        使用可学习权重缩放分类器(LWS)调整各专家输出的尺度
         
-        在模型设计中，专家的输出logits直接相加即可
+        对于每个专家i，输出调整后的logits: ̂z_i = (||w_i||²/||w_1||²)·z_i
+        其中w_i是专家i的全连接层权重，w_1是第一个专家的权重
         """
         feat = self.backbone(x)
         batch_size = x.size(0)
@@ -136,9 +142,30 @@ class MoE4Model(nn.Module):
         # 创建一个全零的输出张量
         combined_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
 
-        # 获取每个专家的输出并直接相加
+        # 获取各专家最后一层全连接层的权重
+        expert_weights = []
+        for expert in self.experts:
+            weight = expert.get_last_layer_weights()
+            if weight is not None:
+                # 计算权重的平方范数 ||w||²
+                weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(2).mean()
+                expert_weights.append(weight_norm_squared)
+            else:
+                # 如果无法获取权重，则使用默认值1.0
+                expert_weights.append(torch.tensor(1.0, device=x.device))
+
+        # 使用第一个专家的权重作为参考
+        reference_weight_norm = expert_weights[0]
+
+        # 获取每个专家的输出并根据权重比例调整后相加
         for i, expert in enumerate(self.experts):
             expert_output = expert(feat)
+
+            if i > 0:  # 第一个专家(i=0)的输出不需要调整
+                # 按照公式 ̂z_i = (||w_i||²/||w_1||²)·z_i 进行调整
+                scaling_factor = expert_weights[i] / reference_weight_norm
+                expert_output = expert_output * scaling_factor
+
             combined_logits += expert_output
 
         return combined_logits

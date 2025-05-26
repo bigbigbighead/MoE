@@ -22,7 +22,7 @@ from validate_model import validate_expert, validate_full_model, validate_router
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/20"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/24"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -38,8 +38,8 @@ LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 # 优化超参数
 BATCH_SIZE = 2048  # 批次大小
 EPOCHS_STAGE1 = 10  # 第一阶段训练轮数
-EPOCHS_EXPERT0 = 2
-EPOCH_EXPERTS = 3
+EPOCHS_EXPERT0 = 15
+EPOCH_EXPERTS = 20
 LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
 CLASS_RANGES = [(0, 199), (0, 99), (100, 149), (150, 199)]
