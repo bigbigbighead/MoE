@@ -22,7 +22,7 @@ from validate_model import validate_expert, validate_full_model, validate_router
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/23"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/20"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -42,7 +42,7 @@ EPOCHS_EXPERT0 = 2
 EPOCH_EXPERTS = 3
 LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
-CLASS_RANGES = [(0, 99), (100, 149), (150, 199)]
+CLASS_RANGES = [(0, 199), (0, 99), (100, 149), (150, 199)]
 NUM_EXPERTS = 3  # MoE专家头数量
 NUM_WORKERS = 2  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
@@ -58,7 +58,7 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
     
     按照Model design.md:
     - 每个专家有自己的目标类范围
-    - 每个专家只会接收标签属于自己目标类的样本来进行训练
+    - 每个专家只会接收标签属于自己目标类的样本来进行训���
     - 专家的损失函数包含分类损失和正则化项
     """
     log_message(f"开始专家训练...")
@@ -91,7 +91,7 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
             if start_epoch != 0:
                 checkpoint = torch.load(final_model_path)
                 model.load_state_dict(checkpoint['model_state_dict'])
-                log_message(f"成功加载final完整模型参数：{final_model_path}")
+                log_message(f"���功加载final完整模型参数：{final_model_path}")
             else:
                 expert_checkpoint_path = os.path.join(RESULTS_PATH, 'param', f'stage1_expert{expert_idx}_latest.pth')
                 if os.path.exists(expert_checkpoint_path):
@@ -212,7 +212,7 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
             log_metrics_to_tensorboard(writer, metrics, epoch, prefix=f'expert{expert_idx}/train_')
 
             log_message(
-                f"  专家{expert_idx} - 训练损失: 分类={avg_cls_loss:.4f}, 正则={avg_reg_loss:.4f}, 总计={avg_total_loss:.4f}, "
+                f"  专家{expert_idx} - 训练��失: 分类={avg_cls_loss:.4f}, 正则={avg_reg_loss:.4f}, 总计={avg_total_loss:.4f}, "
                 f"准确率: {accuracy:.4f}, 耗时: {epoch_time_taken:.2f}s")
 
             # 使用专家对应的验证集验证当前专家的性能
@@ -383,13 +383,13 @@ def evaluate_ensemble_model(model, val_loader, test_loader, device, FLAG=True):
     criterion = nn.CrossEntropyLoss()
     # 评估验证集
     val_start_time = time.time()
-    val_loss, val_accuracy = validate_full_model(model, val_loader, criterion, device, FLAG)
+    val_loss, val_accuracy = validate_full_model(model, val_loader, criterion, device, RESULTS_PATH, FLAG)
     val_time = time.time() - val_start_time
     log_message(f"验证集性能 - 损失: {val_loss:.4f}, 准确率: {val_accuracy:.4f}, 耗时: {val_time:.2f}s")
 
     # 评估测试集
     test_start_time = time.time()
-    test_loss, test_accuracy = validate_full_model(model, test_loader, criterion, device, FLAG)
+    test_loss, test_accuracy = validate_full_model(model, test_loader, criterion, device, RESULTS_PATH, FLAG)
     test_time = time.time() - test_start_time
     log_message(f"测试集性能 - 损失: {test_loss:.4f}, 准确率: {test_accuracy:.4f}, 耗时: {test_time:.2f}s")
 
@@ -465,7 +465,7 @@ if __name__ == "__main__":
     model = train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume_training=RESUME_TRAINING)
 
     # 评估整体模型
-    val_accuracy, test_accuracy = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device)
+    val_accuracy, test_accuracy = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device, False)
 
     # 记录最终结果
     log_message(f"训练完成！")

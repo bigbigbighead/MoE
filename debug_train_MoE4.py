@@ -373,7 +373,7 @@ def validate_expert(model, val_loader, criterion, expert_idx, device):
 
 
 # 优化评估函数，确保正确使用推理方法
-def evaluate_ensemble_model(model, val_loader, test_loader, device, FLAG=True):
+def evaluate_ensemble_model(model, val_loader, test_loader, device, RESULTS_PATH, FLAG=True):
     """
     评估整体模型性能
     采用Model design.md中定义的推理输出方式：直接组合各专家的输出
@@ -383,13 +383,13 @@ def evaluate_ensemble_model(model, val_loader, test_loader, device, FLAG=True):
     criterion = nn.CrossEntropyLoss()
     # 评估验证集
     val_start_time = time.time()
-    val_loss, val_accuracy = validate_full_model(model, val_loader, criterion, device, FLAG)
+    val_loss, val_accuracy = validate_full_model(model, val_loader, criterion, device, RESULTS_PATH, FLAG)
     val_time = time.time() - val_start_time
     log_message(f"验证集性能 - 损失: {val_loss:.4f}, 准确率: {val_accuracy:.4f}, 耗时: {val_time:.2f}s")
 
     # 评估测试集
     test_start_time = time.time()
-    test_loss, test_accuracy = validate_full_model(model, test_loader, criterion, device, FLAG)
+    test_loss, test_accuracy = validate_full_model(model, test_loader, criterion, device, RESULTS_PATH, FLAG)
     test_time = time.time() - test_start_time
     log_message(f"测试集性能 - 损失: {test_loss:.4f}, 准确率: {test_accuracy:.4f}, 耗时: {test_time:.2f}s")
 
@@ -549,18 +549,20 @@ if __name__ == "__main__":
     model = train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume_training=RESUME_TRAINING)
 
     # 评估整体模型
-    val_accuracy, test_accuracy = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device)
+    val_accuracy, test_accuracy = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device,
+                                                          RESULTS_PATH, False)
     # 检查模型保存效果
     latest_all_model, latest_model, final_model = ensure_model(model)
     log_message("=== 模型参数一致性验证 ===")
     log_message("Latest Model:")
     val_accuracy, test_accuracy = evaluate_ensemble_model(latest_all_model, full_val_loader, full_test_loader, device,
-                                                          False)
+                                                          RESULTS_PATH, False)
     log_message("Latest Expert 2 Model:")
     val_accuracy, test_accuracy = evaluate_ensemble_model(latest_model, full_val_loader, full_test_loader, device,
-                                                          False)
+                                                          RESULTS_PATH, False)
     log_message("Final Model:")
-    val_accuracy, test_accuracy = evaluate_ensemble_model(final_model, full_val_loader, full_test_loader, device, False)
+    val_accuracy, test_accuracy = evaluate_ensemble_model(final_model, full_val_loader, full_test_loader, device,
+                                                          RESULTS_PATH, False)
     # 记录最终结果
     log_message(f"训练完成！")
     log_message(f"最终验证集准确率: {val_accuracy:.4f}")

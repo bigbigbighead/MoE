@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from utils.loss_functions import compute_specialized_loss, combine_expert_outputs
 from utils.data_loading_mine import log_message
+from utils.visualization import plot_expert_logits_histograms
 
 
 # 验证单个专家的性能
@@ -72,7 +74,7 @@ def validate_expert(model, val_loader, criterion, expert_idx, device):
 
 
 # 验证完整模型的性能
-def validate_full_model(model, val_loader, criterion, device, FLAG=True):
+def validate_full_model(model, val_loader, criterion, device, RESULTS_PATH, FLAG=True):
     """
     验证完整模型的性能
 
@@ -84,16 +86,41 @@ def validate_full_model(model, val_loader, criterion, device, FLAG=True):
     val_loss = 0
     correct = 0
     total = 0
+
+    # 统计每个专家的logits范围
+    expert_logits_stats = []
+    for i in range(len(model.experts) if not hasattr(model, 'module') else len(model.module.experts)):
+        expert_logits_stats.append({
+            'min': float('inf'),
+            'max': float('-inf'),
+            'mean': [],
+            'std': []
+        })
+
     with torch.no_grad():
-        for inputs, targets in val_loader:
+        for batch_idx, (inputs, targets) in enumerate(val_loader):
             inputs, targets = inputs.to(device), targets.to(device)
 
             # 使用inference方法获取模型预测（确保使用正确的推理逻辑）
             _, expert_outputs, logits = model(inputs)
-            if FLAG:
+
+            # 只对第一个batch的数据进行可视化
+            if batch_idx == 0:
+                plot_expert_logits_histograms(expert_outputs, RESULTS_PATH)
+
+            # 统计每个专家的logits范围
+            for i, expert_output in enumerate(expert_outputs):
+                expert_logits = expert_output.detach().cpu().numpy()
+                expert_logits_stats[i]['min'] = min(expert_logits_stats[i]['min'], np.min(expert_logits))
+                expert_logits_stats[i]['max'] = max(expert_logits_stats[i]['max'], np.max(expert_logits))
+                expert_logits_stats[i]['mean'].append(np.mean(expert_logits))
+                expert_logits_stats[i]['std'].append(np.std(expert_logits))
+
+            if FLAG and batch_idx == 0:
                 log_message(f"sample:{inputs[0]}")
                 log_message(f"logits:{logits[0]}")
                 FLAG = False
+
             # 计算损失
             loss = criterion(logits, targets)
 
@@ -101,6 +128,15 @@ def validate_full_model(model, val_loader, criterion, device, FLAG=True):
             _, predicted = logits.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
+
+    # 计算并记录每个专家的logits统计信息
+    log_message("\n专家logits统计信息:")
+    for i, stats in enumerate(expert_logits_stats):
+        # 计算全局平均值和标准差
+        global_mean = np.mean(stats['mean'])
+        global_std = np.mean(stats['std'])
+        log_message(f"专家{i + 1}: 最小值={stats['min']:.4f}, 最大值={stats['max']:.4f}, "
+                    f"平均值={global_mean:.4f}, 标准差={global_std:.4f}")
 
     return val_loss / len(val_loader), correct / total
 
