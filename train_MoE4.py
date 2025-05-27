@@ -22,7 +22,7 @@ from validate_model import validate_expert, validate_full_model, validate_router
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/24"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/31"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -42,7 +42,7 @@ EPOCHS_EXPERT0 = 15
 EPOCH_EXPERTS = 20
 LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
-CLASS_RANGES = [(0, 199), (0, 99), (100, 149), (150, 199)]
+CLASS_RANGES = [(0, 199), (100, 199), (150, 199)]
 NUM_EXPERTS = 3  # MoE专家头数量
 NUM_WORKERS = 2  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
@@ -91,7 +91,7 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
             if start_epoch != 0:
                 checkpoint = torch.load(final_model_path)
                 model.load_state_dict(checkpoint['model_state_dict'])
-                log_message(f"���功加载final完整模型参数：{final_model_path}")
+                log_message(f"成功加载final完整模型参数：{final_model_path}")
             else:
                 expert_checkpoint_path = os.path.join(RESULTS_PATH, 'param', f'stage1_expert{expert_idx}_latest.pth')
                 if os.path.exists(expert_checkpoint_path):
@@ -212,7 +212,7 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
             log_metrics_to_tensorboard(writer, metrics, epoch, prefix=f'expert{expert_idx}/train_')
 
             log_message(
-                f"  专家{expert_idx} - 训练��失: 分类={avg_cls_loss:.4f}, 正则={avg_reg_loss:.4f}, 总计={avg_total_loss:.4f}, "
+                f"  专家{expert_idx} - 训练损失: 分类={avg_cls_loss:.4f}, 正则={avg_reg_loss:.4f}, 总计={avg_total_loss:.4f}, "
                 f"准确率: {accuracy:.4f}, 耗时: {epoch_time_taken:.2f}s")
 
             # 使用专家对应的验证集验证当前专家的性能

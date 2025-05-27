@@ -8,7 +8,7 @@ from torchvision import datasets, transforms
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/24"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/31"
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -27,7 +27,7 @@ LEARNING_RATE_STAGE2 = 0.0001  # 第二阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
 NUM_EXPERTS = 3  # MoE专家头数量
 ROUTING_TYPE = 'hard'  # 路由类型: 'softmax' 或 'hard'
-NUM_WORKERS = 2  # 数据加载的worker数量
+NUM_WORKERS = 4  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
 PREFETCH_FACTOR = 2  # 增加预取因子
 

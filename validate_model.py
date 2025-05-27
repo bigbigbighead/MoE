@@ -102,7 +102,7 @@ def validate_full_model(model, val_loader, criterion, device, RESULTS_PATH, FLAG
             inputs, targets = inputs.to(device), targets.to(device)
 
             # 使用inference方法获取模型预测（确保使用正确的推理逻辑）
-            _, expert_outputs, logits = model(inputs)
+            expert_outputs, logits = model.inference(inputs)
 
             # 只对第一个batch的数据进行可视化
             if batch_idx == 0:

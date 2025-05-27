@@ -11,14 +11,14 @@ from utils.data_loading_mine import load_data, get_dataloaders, RESULTS_PATH, NU
 import torch.nn as nn
 import datetime
 
-# 设置中文字体支持
-plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
-plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
+# 设置字体，使用通用字体以避免中文字体问题
+plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
+plt.rcParams['axes.unicode_minus'] = True
 
 # 分析配置
 MODEL_PATH = f"{RESULTS_PATH}/param/final_model.pth"
 ANALYSIS_RESULTS_PATH = f"{RESULTS_PATH}/analysis"
-CLASS_RANGES = [(0, 99), (100, 149), (150, 199)]  # 专家负责的类别范围
+CLASS_RANGES = [(0, 199), (0, 99), (100, 149), (150, 199)]  # 专家负责的类别范围
 
 # 创建分析日志文件
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -29,12 +29,12 @@ os.makedirs(ANALYSIS_RESULTS_PATH, exist_ok=True)
 
 
 def load_model(model_path):
-    """加载训练好的模型"""
-    log_message(f"加载模型: {model_path}", ANALYSIS_LOG_FILE)
+    """Load trained model"""
+    log_message(f"Loading model: {model_path}", ANALYSIS_LOG_FILE)
 
     # 确保文件存在
     if not os.path.exists(model_path):
-        log_message(f"错误：模型文件 {model_path} 不存在", ANALYSIS_LOG_FILE)
+        log_message(f"Error: Model file {model_path} does not exist", ANALYSIS_LOG_FILE)
         return None
 
     # 获取输入样本的形状
@@ -57,20 +57,20 @@ def load_model(model_path):
         checkpoint = torch.load(model_path, map_location='cpu')
         if 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'])
-            log_message(f"成功加载模型权重", ANALYSIS_LOG_FILE)
+            log_message(f"Successfully loaded model weights", ANALYSIS_LOG_FILE)
         else:
-            log_message(f"警告：检查点不包含model_state_dict字段", ANALYSIS_LOG_FILE)
+            log_message(f"Warning: Checkpoint does not contain model_state_dict field", ANALYSIS_LOG_FILE)
             return None
     except Exception as e:
-        log_message(f"加载模型时出错: {e}", ANALYSIS_LOG_FILE)
+        log_message(f"Error loading model: {e}", ANALYSIS_LOG_FILE)
         return None
 
     return model
 
 
 def analyze_model(model, test_loader, device):
-    """在测试集上分析模型性能"""
-    log_message("开始分析模型性能...", ANALYSIS_LOG_FILE)
+    """Analyze model performance on test set"""
+    log_message("Starting model analysis...", ANALYSIS_LOG_FILE)
 
     model.to(device)
     model.eval()
@@ -85,7 +85,7 @@ def analyze_model(model, test_loader, device):
             targets = targets.to(device)
 
             # 使用模型预测
-            logits = model.inference(inputs)
+            _, logits = model.inference(inputs)
             _, predictions = torch.max(logits, 1)
 
             all_preds.append(predictions.cpu().numpy())
@@ -99,8 +99,8 @@ def analyze_model(model, test_loader, device):
 
 
 def calculate_per_class_accuracy(preds, targets, num_classes):
-    """计算每个类别的准确率"""
-    log_message("计算每个类别的准确率...", ANALYSIS_LOG_FILE)
+    """Calculate accuracy for each class"""
+    log_message("Calculating per-class accuracy...", ANALYSIS_LOG_FILE)
 
     per_class_correct = np.zeros(num_classes)
     per_class_total = np.zeros(num_classes)
@@ -120,13 +120,13 @@ def calculate_per_class_accuracy(preds, targets, num_classes):
 
 
 def plot_per_class_accuracy(per_class_accuracy, per_class_total, class_ranges):
-    """绘制每个类别的准确率柱状图"""
-    log_message("绘制每个类别准确率柱状图...", ANALYSIS_LOG_FILE)
+    """Plot bar chart of per-class accuracy"""
+    log_message("Plotting per-class accuracy bar chart...", ANALYSIS_LOG_FILE)
 
     plt.figure(figsize=(20, 8))
 
     # 每个专家负责的类别用不同颜色表示
-    colors = ['#3498db', '#2ecc71', '#e74c3c']  # 蓝色、绿色、红色
+    colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12']  # 蓝色、绿色、红色、橙色
 
     for i, (start_class, end_class) in enumerate(class_ranges):
         class_range = list(range(start_class, end_class + 1))
@@ -135,9 +135,9 @@ def plot_per_class_accuracy(per_class_accuracy, per_class_total, class_ranges):
                 color=colors[i],
                 label=f'Expert {i + 1} ({start_class}-{end_class})')
 
-    plt.xlabel('类别')
-    plt.ylabel('准确率')
-    plt.title('每个类别的分类准确率')
+    plt.xlabel('Class')
+    plt.ylabel('Accuracy')
+    plt.title('Per-class Classification Accuracy')
     plt.ylim(0, 1.0)
     plt.legend()
     plt.grid(axis='y', linestyle='--', alpha=0.7)
@@ -164,9 +164,9 @@ def plot_per_class_accuracy(per_class_accuracy, per_class_total, class_ranges):
 
         plt.bar(i, per_class_accuracy[i], width=width, color=colors[color_idx], alpha=0.8)
 
-    plt.xlabel('类别')
-    plt.ylabel('准确率')
-    plt.title('每个类别的分类准确率 (柱宽表示样本数量)')
+    plt.xlabel('Class')
+    plt.ylabel('Accuracy')
+    plt.title('Per-class Classification Accuracy (Bar width represents sample count)')
     plt.ylim(0, 1.0)
     plt.grid(axis='y', linestyle='--', alpha=0.7)
 
@@ -183,8 +183,8 @@ def plot_per_class_accuracy(per_class_accuracy, per_class_total, class_ranges):
 
 
 def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANGES):
-    """创建并可视化混淆矩阵"""
-    log_message("创建混淆矩阵...", ANALYSIS_LOG_FILE)
+    """Create and visualize confusion matrix"""
+    log_message("Creating confusion matrix...", ANALYSIS_LOG_FILE)
 
     # 计算混淆矩阵
     cm = confusion_matrix(targets, preds, labels=range(num_classes))
@@ -197,9 +197,9 @@ def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANG
     # 1. 首先保存完整的混淆矩阵
     plt.figure(figsize=(16, 14))
     sns.heatmap(cm_normalized, cmap="YlGnBu", vmin=0, vmax=1)
-    plt.xlabel('预测标签')
-    plt.ylabel('真实标签')
-    plt.title('归一化混淆矩阵（完整）')
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.title('Normalized Confusion Matrix (Full)')
     plt.savefig(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix_full.png", dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -207,9 +207,9 @@ def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANG
     for i, (start_class, end_class) in enumerate(class_ranges):
         plt.figure(figsize=(14, 12))
         sns.heatmap(cm_normalized[start_class:end_class + 1, :], cmap="YlGnBu", vmin=0, vmax=0.5)
-        plt.xlabel('预测标签')
-        plt.ylabel('真实标签')
-        plt.title(f'专家{i + 1}负责类别的混淆矩阵 ({start_class}-{end_class})')
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
+        plt.title(f'Confusion Matrix for Expert {i + 1} Classes ({start_class}-{end_class})')
         plt.savefig(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix_expert{i + 1}.png", dpi=300, bbox_inches='tight')
         plt.close()
 
@@ -221,8 +221,8 @@ def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANG
 
 
 def analyze_misclassified(cm, cm_normalized, class_ranges):
-    """分析错分情况"""
-    log_message("分析错分情况...", ANALYSIS_LOG_FILE)
+    """Analyze misclassification patterns"""
+    log_message("Analyzing misclassification patterns...", ANALYSIS_LOG_FILE)
 
     # 创建错分分析报告
     report = []
@@ -242,23 +242,23 @@ def analyze_misclassified(cm, cm_normalized, class_ranges):
         # 找出前3个最常错分的类别
         other_indices = [i for i in range(NUM_CLASSES) if i != c]
         top_confused = sorted(other_indices, key=lambda i: cm_normalized[c, i], reverse=True)[:3]
-        top_confused_str = ", ".join([f"类别{i} ({cm_normalized[c, i]:.2%})" for i in top_confused[:3]])
+        top_confused_str = ", ".join([f"Class {i} ({cm_normalized[c, i]:.2%})" for i in top_confused[:3]])
 
         report.append({
-            "类别": c,
-            "负责专家": responsible_expert + 1,  # 专家编号从1开始
-            "样本总数": cm[c].sum(),
-            "正确分类数": cm[c, c],
-            "准确率": cm_normalized[c, c],
-            "错误率": error_rate,
-            "主要错分类别": top_confused_str
+            "Class": c,
+            "Responsible Expert": responsible_expert + 1,  # 专家编号从1开始
+            "Total Samples": cm[c].sum(),
+            "Correct Classifications": cm[c, c],
+            "Accuracy": cm_normalized[c, c],
+            "Error Rate": error_rate,
+            "Top Misclassified As": top_confused_str
         })
 
     # 将报告转换为DataFrame
     df_report = pd.DataFrame(report)
 
     # 按错误率排序
-    df_report = df_report.sort_values("错误率", ascending=False)
+    df_report = df_report.sort_values("Error Rate", ascending=False)
 
     # 保存到CSV
     df_report.to_csv(f"{ANALYSIS_RESULTS_PATH}/misclassification_report.csv", index=False)
@@ -267,7 +267,7 @@ def analyze_misclassified(cm, cm_normalized, class_ranges):
     fig, ax = plt.subplots(figsize=(12, 8))
 
     # 设置不同专家的颜色
-    colors = ['#3498db', '#2ecc71', '#e74c3c']
+    colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12']  # 蓝色、绿色、红色、橙色
 
     # 按专家分组并绘制
     for i, (start, end) in enumerate(class_ranges):
@@ -276,9 +276,9 @@ def analyze_misclassified(cm, cm_normalized, class_ranges):
         ax.bar(expert_classes, error_rates, color=colors[i],
                label=f'Expert {i + 1} ({start}-{end})')
 
-    ax.set_xlabel('类别')
-    ax.set_ylabel('错误率')
-    ax.set_title('每个类别的分类错误率')
+    ax.set_xlabel('Class')
+    ax.set_ylabel('Error Rate')
+    ax.set_title('Classification Error Rate by Class')
     ax.set_ylim(0, 1.0)
     ax.legend()
     ax.grid(axis='y', linestyle='--', alpha=0.7)
@@ -294,16 +294,16 @@ def analyze_misclassified(cm, cm_normalized, class_ranges):
 
         # 找出表现最差的5个类别
         worst_classes = sorted(zip(expert_classes, accuracies), key=lambda x: x[1])[:5]
-        worst_classes_str = ", ".join([f"类别{c} ({acc:.2%})" for c, acc in worst_classes])
+        worst_classes_str = ", ".join([f"Class {c} ({acc:.2%})" for c, acc in worst_classes])
 
         expert_summary.append({
-            "专家编号": i + 1,
-            "负责类别范围": f"{start}-{end}",
-            "类别数量": len(expert_classes),
-            "平均准确率": np.mean(accuracies),
-            "最高准确率": np.max(accuracies),
-            "最低准确率": np.min(accuracies),
-            "表现最差的类别": worst_classes_str
+            "Expert": i + 1,
+            "Class Range": f"{start}-{end}",
+            "Number of Classes": len(expert_classes),
+            "Average Accuracy": np.mean(accuracies),
+            "Max Accuracy": np.max(accuracies),
+            "Min Accuracy": np.min(accuracies),
+            "Worst Performing Classes": worst_classes_str
         })
 
     # 将专家汇总转换为DataFrame
@@ -344,11 +344,11 @@ def analyze_misclassified(cm, cm_normalized, class_ranges):
     # 可视化专家间的错误流动
     plt.figure(figsize=(10, 8))
     sns.heatmap(expert_flow_norm, annot=True, fmt=".2%", cmap="YlGnBu",
-                xticklabels=[f"专家{i + 1}" for i in range(len(class_ranges))],
-                yticklabels=[f"专家{i + 1}" for i in range(len(class_ranges))])
-    plt.xlabel('预测专家')
-    plt.ylabel('真实专家')
-    plt.title('专家间的错误流动（归一化）')
+                xticklabels=[f"Expert {i + 1}" for i in range(len(class_ranges))],
+                yticklabels=[f"Expert {i + 1}" for i in range(len(class_ranges))])
+    plt.xlabel('Predicted Expert')
+    plt.ylabel('True Expert')
+    plt.title('Error Flow Between Experts (Normalized)')
     plt.savefig(f"{ANALYSIS_RESULTS_PATH}/expert_error_flow.png", dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -356,16 +356,16 @@ def analyze_misclassified(cm, cm_normalized, class_ranges):
 
 
 def main():
-    log_message("======= MoE模型分析 =======", ANALYSIS_LOG_FILE)
+    log_message("======= MoE Model Analysis =======", ANALYSIS_LOG_FILE)
 
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    log_message(f"使用设备: {device}", ANALYSIS_LOG_FILE)
+    log_message(f"Using device: {device}", ANALYSIS_LOG_FILE)
 
     # 加载模型
     model = load_model(MODEL_PATH)
     if model is None:
-        log_message("模型加载失败，退出分析", ANALYSIS_LOG_FILE)
+        log_message("Model loading failed, exiting analysis", ANALYSIS_LOG_FILE)
         return
     CLASS_RANGES = model.class_ranges  # 获取模型的类别范围
     # 加载测试数据
@@ -398,17 +398,17 @@ def main():
 
     # 计算总体准确率
     overall_accuracy = np.sum(per_class_correct) / np.sum(per_class_total)
-    log_message(f"总体准确率: {overall_accuracy:.4%}", ANALYSIS_LOG_FILE)
+    log_message(f"Overall accuracy: {overall_accuracy:.4%}", ANALYSIS_LOG_FILE)
 
     # 打印专家性能汇总
-    log_message("\n专家性能汇总:", ANALYSIS_LOG_FILE)
+    log_message("\nExpert Performance Summary:", ANALYSIS_LOG_FILE)
     log_message(expert_report.to_string(), ANALYSIS_LOG_FILE)
 
     # 打印前10个错误率最高的类别
-    log_message("\n错误率最高的10个类别:", ANALYSIS_LOG_FILE)
+    log_message("\nTop 10 classes with highest error rates:", ANALYSIS_LOG_FILE)
     log_message(class_report.head(10).to_string(), ANALYSIS_LOG_FILE)
 
-    log_message(f"\n分析结果已保存至: {ANALYSIS_RESULTS_PATH}", ANALYSIS_LOG_FILE)
+    log_message(f"\nAnalysis results saved to: {ANALYSIS_RESULTS_PATH}", ANALYSIS_LOG_FILE)
 
 
 if __name__ == "__main__":

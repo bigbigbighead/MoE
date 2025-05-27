@@ -132,7 +132,7 @@ class MoE4Model(nn.Module):
         """
         推理模式：根据Model design.md中的公式计算每个类别的输出logits
         使用可学习权重缩放分类器(LWS)调整各专家输出的尺度
-        
+
         对于每个专家i，输出调整后的logits: ̂z_i = (||w_i||²/||w_1||²)·z_i
         其中w_i是专家i的全连接层权重，w_1是第一个专家的权重
         """
@@ -144,6 +144,7 @@ class MoE4Model(nn.Module):
 
         # 获取各专家最后一层全连接层的权重
         expert_weights = []
+        expert_outputs = []
         for expert in self.experts:
             weight = expert.get_last_layer_weights()
             if weight is not None:
@@ -160,15 +161,15 @@ class MoE4Model(nn.Module):
         # 获取每个专家的输出并根据权重比例调整后相加
         for i, expert in enumerate(self.experts):
             expert_output = expert(feat)
-
-            if i > 0:  # 第一个专家(i=0)的输出不需要调整
+            expert_outputs.append(expert_output)
+            if i >= 0:  # 第一个专家(i=0)的输出不需要调整
                 # 按照公式 ̂z_i = (||w_i||²/||w_1||²)·z_i 进行调整
                 scaling_factor = expert_weights[i] / reference_weight_norm
                 expert_output = expert_output * scaling_factor
 
             combined_logits += expert_output
 
-        return combined_logits
+        return expert_outputs, combined_logits
 
     def compute_loss(self, logits, targets, expert_idx):
         """
