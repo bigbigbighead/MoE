@@ -8,7 +8,7 @@ from torchvision import datasets, transforms
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/31"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/32"
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -20,13 +20,8 @@ current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 # 优化超参数
 BATCH_SIZE = 2048  # 批次大小
-EPOCHS_STAGE1 = 300  # 第一阶段训练轮数
-EPOCHS_STAGE2 = 100  # 第二阶段训练轮数
-LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
-LEARNING_RATE_STAGE2 = 0.0001  # 第二阶段学习率
-NUM_CLASSES = 200  # AppClassNet 类别数
-NUM_EXPERTS = 3  # MoE专家头数量
-ROUTING_TYPE = 'hard'  # 路由类型: 'softmax' 或 'hard'
+CLASS_RANGES = [(0, 199), (100, 199), (150, 199)]  # 专家类别范围
+NUM_CLASSES = 200
 NUM_WORKERS = 4  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
 PREFETCH_FACTOR = 2  # 增加预取因子

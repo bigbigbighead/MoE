@@ -131,10 +131,13 @@ class MoE4Model(nn.Module):
     def inference(self, x):
         """
         推理模式：根据Model design.md中的公式计算每个类别的输出logits
-        使用可学习权重缩放分类器(LWS)调整各专家输出的尺度
 
-        对于每个专家i，输出调整后的logits: ̂z_i = (||w_i||²/||w_1||²)·z_i
-        其中w_i是专家i的全连接层权重，w_1是第一个专家的权重
+        1. 对于每个专家i，输出调整后的logits: ̂z_i = (||w_i||²/||w_1||²)·z_i
+           其中w_i是专家i的全连接层权重，w_1是第一个专家的权重
+
+        2. 对于类别c，如果有多个专家负责该类别，则取平均值:
+           o^c = (1/|S_c|) * sum_{ε_i∈S_c} ̂z_i
+           其中S_c是负责类别c的专家集合
         """
         feat = self.backbone(x)
         batch_size = x.size(0)
@@ -145,11 +148,13 @@ class MoE4Model(nn.Module):
         # 获取各专家最后一层全连接层的权重
         expert_weights = []
         expert_outputs = []
+
+        # 计算每个专家的权重平方范数
         for expert in self.experts:
             weight = expert.get_last_layer_weights()
             if weight is not None:
                 # 计算权重的平方范数 ||w||²
-                weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(2).mean()
+                weight_norm_squared = torch.norm(weight, p=2, dim=1).mean()
                 expert_weights.append(weight_norm_squared)
             else:
                 # 如果无法获取权重，则使用默认值1.0
@@ -158,16 +163,34 @@ class MoE4Model(nn.Module):
         # 使用第一个专家的权重作为参考
         reference_weight_norm = expert_weights[0]
 
-        # 获取每个专家的输出并根据权重比例调整后相加
+        # 获取每个专家的原始输出
         for i, expert in enumerate(self.experts):
             expert_output = expert(feat)
             expert_outputs.append(expert_output)
-            if i >= 0:  # 第一个专家(i=0)的输出不需要调整
-                # 按照公式 ̂z_i = (||w_i||²/||w_1||²)·z_i 进行调整
-                scaling_factor = expert_weights[i] / reference_weight_norm
-                expert_output = expert_output * scaling_factor
 
-            combined_logits += expert_output
+        # 为每个类别计算最终的logits输出
+        for c in range(self.total_classes):
+            # 获取负责该类别的所有专家索引
+            responsible_experts = self.class_to_experts[c]
+
+            if len(responsible_experts) == 0:
+                continue  # 如果没有专家负责该类别，跳过
+
+            # 收集负责该类别的所有专家的调整后输出
+            adjusted_expert_outputs = []
+
+            for expert_idx in responsible_experts:
+                # 应用可学习权重缩放: ̂z_i = (||w_i||²/||w_1||²)·z_i
+                scaling_factor = expert_weights[expert_idx] / reference_weight_norm
+                adjusted_output = expert_outputs[expert_idx][:, c] * scaling_factor
+                adjusted_expert_outputs.append(adjusted_output)
+
+            # 对重叠专家的输出取平均值
+            if adjusted_expert_outputs:
+                # 将列表中的张量堆叠起来，然后计算均值
+                stacked_outputs = torch.stack(adjusted_expert_outputs, dim=0)
+                mean_output = torch.mean(stacked_outputs, dim=0)
+                combined_logits[:, c] = mean_output
 
         return expert_outputs, combined_logits
 
@@ -223,7 +246,7 @@ class MoE4Model(nn.Module):
 
     def predict(self, x):
         """返回预测的类别"""
-        logits = self.inference(x)
+        _, logits = self.inference(x)
         _, predicted = torch.max(logits, 1)
         return predicted
 

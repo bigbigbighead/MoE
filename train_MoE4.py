@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import datetime
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,7 +14,7 @@ from torch.cuda.amp import autocast, GradScaler
 from models.MoE import MoE4Model
 from models.ResNet import resnet18
 
-from utils.data_loading_mine import log_message, load_data, get_dataloaders, ROUTING_TYPE
+from utils.data_loading_mine import log_message, load_data, get_dataloaders, CLASS_RANGES
 from utils.load_model import load_pretrained_weights, load_checkpoint
 from utils.loss_functions import compute_specialized_loss, combine_expert_outputs
 from utils.visualization import log_metrics_to_tensorboard, plot_loss_curves, plot_accuracy_curves, \
@@ -20,9 +22,19 @@ from utils.visualization import log_metrics_to_tensorboard, plot_loss_curves, pl
 from validate_model import validate_expert, validate_full_model, validate_router_accuracy, get_expert_indices, \
     compare_model_parameters
 
+# 导入分析模块的函数
+from analyse_MoE import (
+    analyze_model,
+    calculate_per_class_accuracy,
+    plot_per_class_accuracy,
+    create_confusion_matrix,
+    analyze_misclassified,
+    ANALYSIS_RESULTS_PATH
+)
+
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/31"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/32"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -30,6 +42,7 @@ PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_ep
 os.makedirs(RESULTS_PATH, exist_ok=True)
 os.makedirs(f"{RESULTS_PATH}/param", exist_ok=True)
 os.makedirs(f"{RESULTS_PATH}/logs", exist_ok=True)
+os.makedirs(f"{RESULTS_PATH}/analysis", exist_ok=True)  # 确保分析结果目录存在
 
 # 创建日志文件
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -38,12 +51,11 @@ LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 # 优化超参数
 BATCH_SIZE = 2048  # 批次大小
 EPOCHS_STAGE1 = 10  # 第一阶段训练轮数
-EPOCHS_EXPERT0 = 15
+EPOCHS_EXPERT0 = 10
 EPOCH_EXPERTS = 20
 LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
-CLASS_RANGES = [(0, 199), (100, 199), (150, 199)]
-NUM_EXPERTS = 3  # MoE专家头数量
+NUM_EXPERTS = len(CLASS_RANGES)  # MoE专家头数量
 NUM_WORKERS = 2  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
 PREFETCH_FACTOR = 4  # 增加预取因子
@@ -58,7 +70,7 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
     
     按照Model design.md:
     - 每个专家有自己的目标类范围
-    - 每个专家只会接收标签属于自己目标类的样本来进行训���
+    - 每个专家只会接收标签属于自己目标类的样本来进行训练
     - 专家的损失函数包含分类损失和正则化项
     """
     log_message(f"开始专家训练...")
@@ -396,6 +408,53 @@ def evaluate_ensemble_model(model, val_loader, test_loader, device, FLAG=True):
     return val_accuracy, test_accuracy
 
 
+def run_model_analysis(model, test_loader, device):
+    """
+    运行模型分析，调用analyse_MoE.py中的函数
+    """
+    log_message("开始运行模型分析...")
+
+    # 分析模型
+    predictions, targets = analyze_model(model, test_loader, device)
+
+    # 计算每个类别的准确率
+    per_class_accuracy, per_class_correct, per_class_total = calculate_per_class_accuracy(
+        predictions, targets, NUM_CLASSES)
+
+    # 保存每个类别的准确率数据
+    accuracy_data = {
+        'class': np.arange(NUM_CLASSES),
+        'accuracy': per_class_accuracy,
+        'correct': per_class_correct,
+        'total': per_class_total
+    }
+
+    pd.DataFrame(accuracy_data).to_csv(f"{ANALYSIS_RESULTS_PATH}/per_class_accuracy.csv", index=False)
+
+    # 绘制每个类别的准确率柱状图
+    plot_per_class_accuracy(per_class_accuracy, per_class_total, CLASS_RANGES)
+
+    # 创建混淆矩阵
+    cm, cm_normalized = create_confusion_matrix(predictions, targets, NUM_CLASSES, CLASS_RANGES)
+
+    # 分析错分情况
+    class_report, expert_report = analyze_misclassified(cm, cm_normalized, CLASS_RANGES)
+
+    # 计算总体准确率
+    overall_accuracy = np.sum(per_class_correct) / np.sum(per_class_total)
+    log_message(f"整体模型准确率: {overall_accuracy:.4%}")
+
+    # 打印专家性能汇总
+    log_message("\n专家性能汇总:")
+    log_message(expert_report.to_string())
+
+    # 打印前10个错误率最高的类别
+    log_message("\n错误率最高的10个类别:")
+    log_message(class_report.head(10).to_string())
+
+    log_message(f"\n分析结果保存至: {ANALYSIS_RESULTS_PATH}")
+
+
 if __name__ == "__main__":
     # 设置NUMA绑定和多线程优化
     if torch.cuda.is_available():
@@ -416,7 +475,7 @@ if __name__ == "__main__":
     log_message(f"自动混合精度: {USE_AMP}")
     log_message(f"工作进程数: {NUM_WORKERS}")
     log_message(f"专家数量: {NUM_EXPERTS}")
-    log_message(f"路由类型: {ROUTING_TYPE}")
+    # log_message(f"路由类型: {ROUTING_TYPE}")
     log_message(f"类别范围: {CLASS_RANGES}")
     log_message(f"预训练模型路径: {PRETRAINED_RESNET18_PATH}")
 
@@ -471,5 +530,18 @@ if __name__ == "__main__":
     log_message(f"训练完成！")
     log_message(f"最终验证集准确率: {val_accuracy:.4f}")
     log_message(f"最终测试集准确率: {test_accuracy:.4f}")
+
+    # 运行模型分析
+    log_message("开始对模型进行详细分析...")
+    try:
+        # 运行分析
+        run_model_analysis(model, full_test_loader, device)
+        log_message("模型分析完成!")
+    except Exception as e:
+        log_message(f"运行模型分析时出错: {e}")
+        import traceback
+
+        log_message(traceback.format_exc())
+
     log_message(f"=== 训练结束于 {datetime.datetime.now().strftime('%Y.%m.%d_%H:%M:%S')} ===")
     sys.exit(0)

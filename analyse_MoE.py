@@ -7,7 +7,7 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix, classification_report
 import pandas as pd
 from models.MoE import MoE4Model
-from utils.data_loading_mine import load_data, get_dataloaders, RESULTS_PATH, NUM_CLASSES, log_message
+from utils.data_loading_mine import load_data, get_dataloaders, RESULTS_PATH, NUM_CLASSES, log_message, CLASS_RANGES
 import torch.nn as nn
 import datetime
 
@@ -18,7 +18,8 @@ plt.rcParams['axes.unicode_minus'] = True
 # 分析配置
 MODEL_PATH = f"{RESULTS_PATH}/param/final_model.pth"
 ANALYSIS_RESULTS_PATH = f"{RESULTS_PATH}/analysis"
-CLASS_RANGES = [(0, 199), (0, 99), (100, 149), (150, 199)]  # 专家负责的类别范围
+colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12', '#9b59b6', '#1abc9c', '#34495e', '#f1c40f', '#e67e22', '#95a5a6',
+          '#d35400', '#8e44ad']  # 蓝色、绿色、红色、橙色、紫色、青色、深蓝色、黄色、橙红色、灰色、深橙色、深紫色
 
 # 创建分析日志文件
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -125,8 +126,8 @@ def plot_per_class_accuracy(per_class_accuracy, per_class_total, class_ranges):
 
     plt.figure(figsize=(20, 8))
 
-    # 每个专家负责的类别用不同颜色表示
-    colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12']  # 蓝色、绿色、红色、橙色
+    # # 每个专家负责的类别用不同颜色表示
+    # colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12']  # 蓝色、绿色、红色、橙色
 
     for i, (start_class, end_class) in enumerate(class_ranges):
         class_range = list(range(start_class, end_class + 1))
@@ -267,7 +268,7 @@ def analyze_misclassified(cm, cm_normalized, class_ranges):
     fig, ax = plt.subplots(figsize=(12, 8))
 
     # 设置不同专家的颜色
-    colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12']  # 蓝色、绿色、红色、橙色
+    # colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12']  # 蓝色、绿色、红色、橙色
 
     # 按专家分组并绘制
     for i, (start, end) in enumerate(class_ranges):
