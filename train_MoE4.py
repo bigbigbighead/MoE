@@ -44,6 +44,9 @@ os.makedirs(f"{RESULTS_PATH}/param", exist_ok=True)
 os.makedirs(f"{RESULTS_PATH}/logs", exist_ok=True)
 os.makedirs(f"{RESULTS_PATH}/analysis", exist_ok=True)  # 确保分析结果目录存在
 
+# 缓存文件路径
+CACHE_PATH = os.path.join(RESULTS_PATH, "param", "cached_computations.pth")
+
 # 创建日志文件
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
@@ -392,6 +395,15 @@ def evaluate_ensemble_model(model, val_loader, test_loader, device, FLAG=True):
     """
     log_message("开始评估整体模型性能...")
 
+    # 确保模型已经预计算了缩放因子
+    if not model.has_cached_computation:
+        if hasattr(model, 'module'):  # 处理DataParallel包装的模型
+            log_message("预计算专家缩放因子...")
+            model.module.precompute_scaling_factors()
+        else:
+            log_message("预计算专家缩放因子...")
+            model.precompute_scaling_factors()
+
     criterion = nn.CrossEntropyLoss()
     # 评估验证集
     val_start_time = time.time()
@@ -413,6 +425,15 @@ def run_model_analysis(model, test_loader, device):
     运行模型分析，调用analyse_MoE.py中的函数
     """
     log_message("开始运行模型分析...")
+
+    # 确保模型已经预计算了缩放因子
+    if not model.has_cached_computation:
+        if hasattr(model, 'module'):  # 处理DataParallel包装的模型
+            log_message("预计算专家缩放因子...")
+            model.module.precompute_scaling_factors()
+        else:
+            log_message("预计算专家缩放因子...")
+            model.precompute_scaling_factors()
 
     # 分析模型
     predictions, targets = analyze_model(model, test_loader, device)
@@ -522,6 +543,25 @@ if __name__ == "__main__":
 
     # 训练专家
     model = train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume_training=RESUME_TRAINING)
+
+    # 在评估前预计算
+    log_message("训练完成，预计算专家缩放因子...")
+    if hasattr(model, 'module'):  # 处理DataParallel包装的模型
+        model.module.precompute_scaling_factors()
+    else:
+        model.precompute_scaling_factors()
+
+    # 保存带有预计算结果的完整模型
+    log_message("保存带有预计算缩放因子的完整模型...")
+    final_checkpoint_path = os.path.join(RESULTS_PATH, 'param', 'final_model.pth')
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'class_ranges': model.class_ranges,
+        'total_classes': model.total_classes,
+        'has_cached_computation': True,
+        'cached_scaling_factors': model.cached_scaling_factors if not hasattr(model, 'module') else model.module.cached_scaling_factors
+    }, final_checkpoint_path)
+    log_message(f"带有预计算缩放因子的完整模型已保存到 {final_checkpoint_path}")
 
     # 评估整体模型
     val_accuracy, test_accuracy = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device, False)

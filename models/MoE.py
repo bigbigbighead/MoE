@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from models.ResNet import ResNetBlock, ResNetBackbone, resnet18_backbone
+from utils.data_loading_mine import log_message
 from utils.loss_functions import compute_specialized_loss
 
 
@@ -107,6 +108,11 @@ class MoE4Model(nn.Module):
                 if start <= c <= end:
                     self.class_to_experts[c].append(i)
 
+        # 缓存计算结果的标志
+        self.has_cached_computation = False
+        # 使用普通属性而非buffer来存储缩放因子
+        self.cached_scaling_factors = None
+
     def forward(self, x):
         # 提取特征
         feat = self.backbone(x)
@@ -128,16 +134,52 @@ class MoE4Model(nn.Module):
         # 返回特征、各专家输出和相加后的结果
         return feat, expert_outputs, combined_logits
 
+    def precompute_scaling_factors(self):
+        """
+        预计算所有专家的缩放因子并存储在模型的缓存中
+        这个方法应该在模型训练完成后调用一次
+        """
+        # 获取各专家最后一层全连接层的权重
+        expert_weights = []
+
+        # 计算每个专家的权重平方范数
+        for i, expert in enumerate(self.experts):
+            weight = expert.get_last_layer_weights()
+            if weight is not None:
+                # 计算权重的平方范数 ||w||²
+                weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(2).mean()
+                log_message(f"专家 {i} 的权重平方范数: {weight_norm_squared.item():.4f}")
+                expert_weights.append(weight_norm_squared)
+            else:
+                # 如果无法获取权重，则使用默认值1.0
+                log_message(f"专家 {i} 无法获取权重，使用默认值1.0")
+                expert_weights.append(torch.tensor(1.0, device=weight.device if weight is not None else 'cpu'))
+
+        # 使用第一个专家的权重作为参考
+        reference_weight_norm = expert_weights[0]
+
+        # 初始化缩放因子字典 - 使用普通字典而非试图注册为buffer
+        scaling_factors_dict = {}
+
+        # 计算缩放因子
+        for c in range(self.total_classes):
+            responsible_experts = self.class_to_experts[c]
+            if len(responsible_experts) > 0:
+                class_scaling_factors = []
+                for expert_idx in responsible_experts:
+                    scaling_factor = reference_weight_norm / expert_weights[expert_idx]
+                    class_scaling_factors.append((expert_idx, scaling_factor.item()))
+                scaling_factors_dict[c] = class_scaling_factors
+
+        # 直接存储字典，不再尝试将其注册为buffer
+        self.cached_scaling_factors = scaling_factors_dict
+        self.has_cached_computation = True
+        return scaling_factors_dict
+
     def inference(self, x):
         """
         推理模式：根据Model design.md中的公式计算每个类别的输出logits
-
-        1. 对于每个专家i，输出调整后的logits: ̂z_i = (||w_i||²/||w_1||²)·z_i
-           其中w_i是专家i的全连接层权重，w_1是第一个专家的权重
-
-        2. 对于类别c，如果有多个专家负责该类别，则取平均值:
-           o^c = (1/|S_c|) * sum_{ε_i∈S_c} ̂z_i
-           其中S_c是负责类别c的专家集合
+        使用预计算的缩放因子来提高效率
         """
         feat = self.backbone(x)
         batch_size = x.size(0)
@@ -145,52 +187,75 @@ class MoE4Model(nn.Module):
         # 创建一个全零的输出张量
         combined_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
 
-        # 获取各专家最后一层全连接层的权重
-        expert_weights = []
-        expert_outputs = []
-
-        # 计算每个专家的权重平方范数
-        for expert in self.experts:
-            weight = expert.get_last_layer_weights()
-            if weight is not None:
-                # 计算权重的平方范数 ||w||²
-                weight_norm_squared = torch.norm(weight, p=2, dim=1).mean()
-                expert_weights.append(weight_norm_squared)
-            else:
-                # 如果无法获取权重，则使用默认值1.0
-                expert_weights.append(torch.tensor(1.0, device=x.device))
-
-        # 使用第一个专家的权重作为参考
-        reference_weight_norm = expert_weights[0]
-
         # 获取每个专家的原始输出
-        for i, expert in enumerate(self.experts):
+        expert_outputs = []
+        for expert in self.experts:
             expert_output = expert(feat)
             expert_outputs.append(expert_output)
 
-        # 为每个类别计算最终的logits输出
-        for c in range(self.total_classes):
-            # 获取负责该类别的所有专家索引
-            responsible_experts = self.class_to_experts[c]
+        # 使用缓存的缩放因子(如果已经预计算)
+        if not self.has_cached_computation:
+            # 如果尚未预计算，则使用原始方法
+            # 获取各专家最后一层全连接层的权重
+            expert_weights = []
 
-            if len(responsible_experts) == 0:
-                continue  # 如果没有专家负责该类别，跳过
+            # 计算每个专家的权重平方范数
+            for expert in self.experts:
+                weight = expert.get_last_layer_weights()
+                if weight is not None:
+                    # 计算权重的平方范数 ||w||²
+                    weight_norm_squared = torch.norm(weight, p=2, dim=1).mean()
+                    expert_weights.append(weight_norm_squared)
+                else:
+                    # 如果无法获取权重，则使用默认值1.0
+                    expert_weights.append(torch.tensor(1.0, device=x.device))
 
-            # 收集负责该类别的所有专家的调整后输出
-            adjusted_expert_outputs = []
+            # 使用第一个专家的权重作为参考
+            reference_weight_norm = expert_weights[0]
 
-            for expert_idx in responsible_experts:
-                # 应用可学习权重缩放: ̂z_i = (||w_i||²/||w_1||²)·z_i
-                scaling_factor = expert_weights[expert_idx] / reference_weight_norm
-                adjusted_output = expert_outputs[expert_idx][:, c] * scaling_factor
-                adjusted_expert_outputs.append(adjusted_output)
+            # 为每个类别计算最终的logits输出
+            for c in range(self.total_classes):
+                # 获取负责该类别的所有专家索引
+                responsible_experts = self.class_to_experts[c]
 
-            # 对重叠专家的输出取平均值
-            if adjusted_expert_outputs:
-                # 将列表中的张量堆叠起来，然后计算均值
-                stacked_outputs = torch.stack(adjusted_expert_outputs, dim=0)
-                mean_output = torch.mean(stacked_outputs, dim=0)
-                combined_logits[:, c] = mean_output
+                if len(responsible_experts) == 0:
+                    continue  # 如果没有专家负责该类别，跳过
+
+                # 收集负责该类别的所有专家的调整后输出
+                adjusted_expert_outputs = []
+
+                for expert_idx in responsible_experts:
+                    # 应用可学习权重缩放: ̂z_i = (||w_i||²/||w_1||²)·z_i
+                    scaling_factor = expert_weights[expert_idx] / reference_weight_norm
+                    adjusted_output = expert_outputs[expert_idx][:, c] / scaling_factor
+                    adjusted_expert_outputs.append(adjusted_output)
+
+                # 对重叠专家的输出取平均值
+                if adjusted_expert_outputs:
+                    # 将列表中的张量堆叠起来，然后计算均值
+                    stacked_outputs = torch.stack(adjusted_expert_outputs, dim=0)
+                    mean_output = torch.mean(stacked_outputs, dim=0)
+                    combined_logits[:, c] = mean_output
+        else:
+            # 使用预计算的缩放因子
+            for c in range(self.total_classes):
+                if c in self.cached_scaling_factors:
+                    class_scaling_factors = self.cached_scaling_factors[c]
+
+                    # 收集负责该类别的所有专家的调整后输出
+                    adjusted_expert_outputs = []
+
+                    for expert_idx, scaling_factor in class_scaling_factors:
+                        # 在这里，scaling_factor是标量值
+                        scaling_factor_tensor = torch.tensor(scaling_factor, device=x.device)
+                        adjusted_output = expert_outputs[expert_idx][:, c] * scaling_factor_tensor
+                        adjusted_expert_outputs.append(adjusted_output)
+
+                    # 对重叠专家的输出取平均值
+                    if adjusted_expert_outputs:
+                        stacked_outputs = torch.stack(adjusted_expert_outputs, dim=0)
+                        mean_output = torch.mean(stacked_outputs, dim=0)
+                        combined_logits[:, c] = mean_output
 
         return expert_outputs, combined_logits
 

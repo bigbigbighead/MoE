@@ -207,11 +207,19 @@ def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANG
     # 2. 然后按照专家负责的类别范围分块可视化
     for i, (start_class, end_class) in enumerate(class_ranges):
         plt.figure(figsize=(14, 12))
-        sns.heatmap(cm_normalized[start_class:end_class + 1, :], cmap="YlGnBu", vmin=0, vmax=0.5)
+        if (end_class - start_class) >= 80:
+            # 每隔10或20个类别显示一个标签
+            label_interval = 5
+            y_ticks = range(start_class, end_class + 1, label_interval)
+            plt.yticks(y_ticks, [str(i) for i in y_ticks])
+        # 创建真实的y轴标签
+        y_labels = list(range(start_class, end_class + 1))
+        sns.heatmap(cm_normalized[start_class:end_class + 1, :], cmap="YlGnBu", vmin=0, vmax=0.5,
+                    yticklabels=y_labels)
         plt.xlabel('Predicted Label')
         plt.ylabel('True Label')
         plt.title(f'Confusion Matrix for Expert {i + 1} Classes ({start_class}-{end_class})')
-        plt.savefig(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix_expert{i + 1}.png", dpi=300, bbox_inches='tight')
+        plt.savefig(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix_expert{i}.png", dpi=300, bbox_inches='tight')
         plt.close()
 
     # 保存原始混淆矩阵数据以便进一步分析
