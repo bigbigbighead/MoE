@@ -207,15 +207,33 @@ def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANG
     # 2. 然后按照专家负责的类别范围分块可视化
     for i, (start_class, end_class) in enumerate(class_ranges):
         plt.figure(figsize=(14, 12))
-        if (end_class - start_class) >= 80:
-            # 每隔10或20个类别显示一个标签
-            label_interval = 5
-            y_ticks = range(start_class, end_class + 1, label_interval)
-            plt.yticks(y_ticks, [str(i) for i in y_ticks])
-        # 创建真实的y轴标签
+
+        # 创建真实的y轴标签列表
         y_labels = list(range(start_class, end_class + 1))
-        sns.heatmap(cm_normalized[start_class:end_class + 1, :], cmap="YlGnBu", vmin=0, vmax=0.5,
-                    yticklabels=y_labels)
+
+        # 当类别数量过多时，设置间隔显示标签
+        if (end_class - start_class) >= 80:
+            # 计算合适的间隔
+            label_interval = max(4, (end_class - start_class) // 20)
+
+            # 创建新的标签列表，只在特定间隔显示
+            sparse_labels = []
+            for idx, label in enumerate(y_labels):
+                if (label - start_class) % label_interval == 0:
+                    sparse_labels.append(str(label))
+                else:
+                    sparse_labels.append('')
+
+            # 使用间隔标签绘制热图
+            sns.heatmap(cm_normalized[start_class:end_class + 1, :],
+                        cmap="YlGnBu", vmin=0, vmax=0.5,
+                        yticklabels=sparse_labels)
+        else:
+            # 类别数量不多时正常显示所有标签
+            sns.heatmap(cm_normalized[start_class:end_class + 1, :],
+                        cmap="YlGnBu", vmin=0, vmax=0.5,
+                        yticklabels=y_labels)
+
         plt.xlabel('Predicted Label')
         plt.ylabel('True Label')
         plt.title(f'Confusion Matrix for Expert {i + 1} Classes ({start_class}-{end_class})')

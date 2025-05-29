@@ -34,7 +34,7 @@ from analyse_MoE import (
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/32"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/48"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -559,7 +559,8 @@ if __name__ == "__main__":
         'class_ranges': model.class_ranges,
         'total_classes': model.total_classes,
         'has_cached_computation': True,
-        'cached_scaling_factors': model.cached_scaling_factors if not hasattr(model, 'module') else model.module.cached_scaling_factors
+        'cached_scaling_factors': model.cached_scaling_factors if not hasattr(model,
+                                                                              'module') else model.module.cached_scaling_factors
     }, final_checkpoint_path)
     log_message(f"带有预计算缩放因子的完整模型已保存到 {final_checkpoint_path}")
 
