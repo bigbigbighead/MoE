@@ -80,12 +80,20 @@ def validate_full_model(model, val_loader, criterion, device, RESULTS_PATH, FLAG
 
     按照Model design.md，推理输出公式为:
     o^c = (1/|S_c|) * sum(z_i)，其中z_i是专家i对类别c的输出
-    在本模型中，由于专家责任范围互不重叠，每个类别只由一个专家负责，公式简化为直接取专家输出
+    
+    如果处于第二阶段模式，则使用整合层进行推理
     """
     model.eval()
     val_loss = 0
     correct = 0
     total = 0
+
+    # 检查模型是否处于第二阶段模式
+    stage2_mode = False
+    if hasattr(model, 'module'):
+        stage2_mode = getattr(model.module, 'stage2_mode', False)
+    else:
+        stage2_mode = getattr(model, 'stage2_mode', False)
 
     # 统计每个专家的logits范围
     expert_logits_stats = []
@@ -101,8 +109,13 @@ def validate_full_model(model, val_loader, criterion, device, RESULTS_PATH, FLAG
         for batch_idx, (inputs, targets) in enumerate(val_loader):
             inputs, targets = inputs.to(device), targets.to(device)
 
-            # 使用inference方法获取模型预测（确保使用正确的推理逻辑）
-            expert_outputs, logits = model.inference(inputs)
+            # 使用适当的推理方法获取模型预测
+            if stage2_mode:
+                # 直接使用forward方法，确保使用整合层
+                _, expert_outputs, logits = model(inputs)
+            else:
+                # 使用inference方法获取模型预测
+                expert_outputs, logits = model.inference(inputs)
 
             # 只对第一个batch的数据进行可视化
             if batch_idx == 0:
@@ -119,6 +132,7 @@ def validate_full_model(model, val_loader, criterion, device, RESULTS_PATH, FLAG
             if FLAG and batch_idx == 0:
                 log_message(f"sample:{inputs[0]}")
                 log_message(f"logits:{logits[0]}")
+                log_message(f"使用{'第二阶段整合层' if stage2_mode else '第一阶段预计算缩放因子'}推理")
                 FLAG = False
 
             # 计算损失

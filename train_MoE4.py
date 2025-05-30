@@ -34,7 +34,7 @@ from analyse_MoE import (
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/48"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/52"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -54,9 +54,11 @@ LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 # 优化超参数
 BATCH_SIZE = 2048  # 批次大小
 EPOCHS_STAGE1 = 10  # 第一阶段训练轮数
-EPOCHS_EXPERT0 = 10
-EPOCH_EXPERTS = 20
+EPOCHS_EXPERT0_STAGE1 = 10
+EPOCH_EXPERTS_STAGE1 = 20
+EPOCHS_STAGE2 = 10  # 第二阶段训练轮数
 LEARNING_RATE_STAGE1 = 0.001  # 第一阶段学习率
+LEARNING_RATE_STAGE2 = 0.0005  # 第二阶段学习率
 NUM_CLASSES = 200  # AppClassNet 类别数
 NUM_EXPERTS = len(CLASS_RANGES)  # MoE专家头数量
 NUM_WORKERS = 2  # 数据加载的worker数量
@@ -143,9 +145,9 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
         train_accuracies = []
         val_accuracies = []
         if expert_idx == 0:
-            EPOCHS_STAGE1 = EPOCHS_EXPERT0
+            EPOCHS_STAGE1 = EPOCHS_EXPERT0_STAGE1
         else:
-            EPOCHS_STAGE1 = EPOCH_EXPERTS
+            EPOCHS_STAGE1 = EPOCH_EXPERTS_STAGE1
         # 内层循环：该专家的完整训练周期
         for epoch in range(start_epoch, EPOCHS_STAGE1):
             epoch_start_time = time.time()
@@ -324,6 +326,234 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
         'total_classes': model.total_classes
     }, final_checkpoint_path)
     log_message(f"所有专家训练完成，完整模型已保存到 {final_checkpoint_path}")
+    writer.close()
+
+    return model
+
+
+def train_stage2(model, full_train_loader, full_val_loader, full_test_loader, device, resume_training=False):
+    """
+    第二阶段训练：训练整合层
+    
+    按照Model design v2.md:
+    - 三个专家的输出拼接起来送入到一个全连接层
+    - 第二阶段只训练这个全连接层的参数
+    """
+    log_message(f"开始第二阶段训练...")
+    writer = SummaryWriter(os.path.join(RESULTS_PATH, 'logs', 'stage2'))
+
+    # 启用第二阶段模式，冻结backbone和专家参数，只训练整合层
+    model.enable_stage2_mode()
+
+    # 创建优化器，只优化整合层
+    optimizer = optim.Adam(model.integrator.parameters(), lr=LEARNING_RATE_STAGE2)
+
+    # 创建损失函数
+    criterion = nn.CrossEntropyLoss()
+
+    # 创建混合精度训练的scaler
+    scaler = GradScaler() if USE_AMP else None
+
+    # 添加恢复训练功能
+    start_epoch = 0
+    best_val_acc = 0.0
+
+    if resume_training:
+        stage2_checkpoint_path = os.path.join(RESULTS_PATH, 'param', 'stage2_latest.pth')
+        if os.path.exists(stage2_checkpoint_path):
+            checkpoint = torch.load(stage2_checkpoint_path)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                start_epoch = checkpoint['epoch'] + 1
+                best_val_acc = checkpoint['best_val_acc']
+                log_message(f"已加载第二阶段检查点，从第{start_epoch}轮继续训练，当前最佳验证准确率: {best_val_acc:.4f}")
+
+    # 记录训练历史
+    train_losses = []
+    val_losses = []
+    train_accuracies = []
+    val_accuracies = []
+
+    # 开始训练
+    for epoch in range(start_epoch, EPOCHS_STAGE2):
+        epoch_start_time = time.time()
+        log_message(f"第二阶段 - Epoch {epoch + 1}/{EPOCHS_STAGE2}")
+
+        # 训练模式
+        model.train()
+        model.backbone.eval()  # 确保backbone在评估模式
+
+        # 训练一个epoch
+        epoch_loss = 0
+        correct = 0
+        total = 0
+        batch_train_time = 0
+
+        for batch_idx, (inputs, targets) in enumerate(full_train_loader):
+            batch_start_time = time.time()
+            inputs, targets = inputs.to(device, non_blocking=True), targets.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)  # 更快地重置梯度
+
+            # 使用混合精度训练
+            if USE_AMP and scaler is not None:
+                with autocast():
+                    # 前向传播，此时model.stage2_mode=True，会使用整合层
+                    _, expert_outputs, logits = model(inputs)
+                    loss = criterion(logits, targets)
+
+                # 使用scaler进行反向传播和优化
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # 前向传播
+                _, expert_outputs, logits = model(inputs)
+                loss = criterion(logits, targets)
+
+                # 反向传播与优化
+                loss.backward()
+                optimizer.step()
+
+            batch_time_taken = time.time() - batch_start_time
+            batch_train_time += batch_time_taken
+
+            # 统计
+            epoch_loss += loss.item()
+            _, predicted = logits.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+
+            # # 打印批次进度
+            # if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(full_train_loader):
+            #     log_message(f"  批次 {batch_idx + 1}/{len(full_train_loader)}, "
+            #                 f"损失: {loss.item():.4f}, "
+            #                 f"准确率: {100. * correct / total:.2f}%, "
+            #                 f"耗时: {batch_time_taken:.2f}s")
+
+        # 计算训练集平均损失和准确率
+        avg_loss = epoch_loss / len(full_train_loader)
+        accuracy = correct / total
+        train_losses.append(avg_loss)
+        train_accuracies.append(accuracy)
+        epoch_time_taken = time.time() - epoch_start_time
+
+        # 记录TensorBoard指标
+        writer.add_scalar('train/loss', avg_loss, epoch)
+        writer.add_scalar('train/accuracy', accuracy, epoch)
+
+        log_message(f"  训练损失: {avg_loss:.4f}, 准确率: {accuracy:.4f}, 耗时: {epoch_time_taken:.2f}s")
+
+        # 验证模型
+        val_start_time = time.time()
+        model.eval()
+        val_loss = 0
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for inputs, targets in full_val_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
+
+                # 确保在stage2_mode下进行推理
+                _, _, logits = model(inputs)
+
+                loss = criterion(logits, targets)
+                val_loss += loss.item()
+                _, predicted = logits.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+
+        # 计算验证集平均损失和准确率
+        avg_val_loss = val_loss / len(full_val_loader)
+        val_accuracy = correct / total
+        val_losses.append(avg_val_loss)
+        val_accuracies.append(val_accuracy)
+        val_time_taken = time.time() - val_start_time
+
+        # 记录TensorBoard指标
+        writer.add_scalar('val/loss', avg_val_loss, epoch)
+        writer.add_scalar('val/accuracy', val_accuracy, epoch)
+
+        log_message(f"  验证损失: {avg_val_loss:.4f}, 准确率: {val_accuracy:.4f}, 耗时: {val_time_taken:.2f}s")
+
+        # 测试模型
+        test_start_time = time.time()
+        model.eval()
+        test_loss = 0
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for inputs, targets in full_test_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
+
+                # 确保在stage2_mode下进行推理
+                _, _, logits = model(inputs)
+
+                loss = criterion(logits, targets)
+                test_loss += loss.item()
+                _, predicted = logits.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+
+        # 计算测试集平均损失和准确率
+        avg_test_loss = test_loss / len(full_test_loader)
+        test_accuracy = correct / total
+        test_time_taken = time.time() - test_start_time
+
+        # 记录TensorBoard指标
+        writer.add_scalar('test/loss', avg_test_loss, epoch)
+        writer.add_scalar('test/accuracy', test_accuracy, epoch)
+
+        log_message(f"  测试损失: {avg_test_loss:.4f}, 准确率: {test_accuracy:.4f}, 耗时: {test_time_taken:.2f}s")
+
+        # 保存最新检查点
+        checkpoint_path = os.path.join(RESULTS_PATH, 'param', 'stage2_latest.pth')
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'val_loss': avg_val_loss,
+            'val_accuracy': val_accuracy,
+            'best_val_acc': max(best_val_acc, val_accuracy)
+        }, checkpoint_path)
+
+        # 如果是最佳性能，保存最佳检查点
+        if val_accuracy > best_val_acc:
+            best_val_acc = val_accuracy
+            best_checkpoint_path = os.path.join(RESULTS_PATH, 'param', 'stage2_best.pth')
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': avg_val_loss,
+                'val_accuracy': val_accuracy,
+                'best_val_acc': best_val_acc
+            }, best_checkpoint_path)
+            log_message(f"  已保存最佳模型，验证准确率: {best_val_acc:.4f}")
+
+        # 定期保存阶段性检查点
+        if (epoch + 1) % 5 == 0 or (epoch + 1) == EPOCHS_STAGE2:
+            epoch_checkpoint_path = os.path.join(RESULTS_PATH, 'param', f'stage2_epoch{epoch + 1}.pth')
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': avg_val_loss,
+                'val_accuracy': val_accuracy,
+                'best_val_acc': best_val_acc
+            }, epoch_checkpoint_path)
+            log_message(f"  已保存Epoch {epoch + 1}检查点")
+
+    # 绘制损失和准确率曲线
+    loss_curve_path = os.path.join(RESULTS_PATH, 'logs', 'stage2_loss_curve.png')
+    acc_curve_path = os.path.join(RESULTS_PATH, 'logs', 'stage2_accuracy_curve.png')
+    plot_loss_curves(train_losses, val_losses, loss_curve_path)
+    plot_accuracy_curves(train_accuracies, val_accuracies, acc_curve_path)
+    log_message(f"已保存第二阶段损失和准确率曲线")
+
     writer.close()
 
     return model
@@ -551,9 +781,9 @@ if __name__ == "__main__":
     else:
         model.precompute_scaling_factors()
 
-    # 保存带有预计算结果的完整模型
+    # 保存带有预计算结果的第一阶段完整模型
     log_message("保存带有预计算缩放因子的完整模型...")
-    final_checkpoint_path = os.path.join(RESULTS_PATH, 'param', 'final_model.pth')
+    stage1_checkpoint_path = os.path.join(RESULTS_PATH, 'param', 'stage1_final_model.pth')
     torch.save({
         'model_state_dict': model.state_dict(),
         'class_ranges': model.class_ranges,
@@ -561,16 +791,41 @@ if __name__ == "__main__":
         'has_cached_computation': True,
         'cached_scaling_factors': model.cached_scaling_factors if not hasattr(model,
                                                                               'module') else model.module.cached_scaling_factors
-    }, final_checkpoint_path)
-    log_message(f"带有预计算缩放因子的完整模型已保存到 {final_checkpoint_path}")
+    }, stage1_checkpoint_path)
+    log_message(f"带有预计算缩放因子的第一阶段完整模型已保存到 {stage1_checkpoint_path}")
 
-    # 评估整体模型
+    # 评估第一阶段模型
+    log_message("评估第一阶段模型性能...")
+    stage1_val_acc, stage1_test_acc = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device, False)
+    log_message(f"第一阶段模型验证集准确率: {stage1_val_acc:.4f}")
+    log_message(f"第一阶段模型测试集准确率: {stage1_test_acc:.4f}")
+
+    # 第二阶段训练
+    log_message("开始第二阶段训练...")
+    model = train_stage2(model, full_train_loader, full_val_loader, full_test_loader, device,
+                         resume_training=RESUME_TRAINING)
+
+    # 保存第二阶段完整模型
+    final_model_path = os.path.join(RESULTS_PATH, 'param', 'final_model.pth')
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'class_ranges': model.class_ranges,
+        'total_classes': model.total_classes,
+        'stage2_mode': True
+    }, final_model_path)
+    log_message(f"第二阶段完整模型已保存到 {final_model_path}")
+
+    # 评估最终模型
+    log_message("评估最终模型性能...")
     val_accuracy, test_accuracy = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device, False)
 
     # 记录最终结果
     log_message(f"训练完成！")
-    log_message(f"最终验证集准确率: {val_accuracy:.4f}")
-    log_message(f"最终测试集准确率: {test_accuracy:.4f}")
+    log_message(f"第一阶段验证集准确率: {stage1_val_acc:.4f}")
+    log_message(f"第一阶段测试集准确率: {stage1_test_acc:.4f}")
+    log_message(f"第二阶段验证集准确率: {val_accuracy:.4f}")
+    log_message(f"第二阶段测试集准确率: {test_accuracy:.4f}")
+    log_message(f"性能提升: {(test_accuracy - stage1_test_acc) * 100:.2f}%")
 
     # 运行模型分析
     log_message("开始对模型进行详细分析...")

@@ -8,7 +8,7 @@ from torchvision import datasets, transforms
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/48"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/52"
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -24,7 +24,7 @@ CLASS_RANGES = [(0, 199), (100, 199), (150, 199)]  # 专家类别范围
 NUM_CLASSES = 200
 NUM_WORKERS = 4  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
-PREFETCH_FACTOR = 2  # 增加预取因子
+PREFETCH_FACTOR = 4  # 增加预取因子
 
 # 自动混合精度训练配置
 USE_AMP = True  # 启用自动混合精度训练

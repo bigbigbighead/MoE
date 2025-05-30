@@ -113,6 +113,14 @@ class MoE4Model(nn.Module):
         # 使用普通属性而非buffer来存储缩放因子
         self.cached_scaling_factors = None
 
+        # 第二阶段训练使用的整合层
+        # 将所有专家的输出拼接起来，输入到全连接层
+        total_expert_outputs = self.total_classes * self.num_experts  # 每个专家负责的类别数相同
+        self.integrator = nn.Linear(total_expert_outputs, total_classes)
+
+        # 第二阶段训练标志
+        self.stage2_mode = False
+
     def forward(self, x):
         # 提取特征
         feat = self.backbone(x)
@@ -131,7 +139,14 @@ class MoE4Model(nn.Module):
             # 直接将每个专家的输出相加到combined_logits
             combined_logits += expert_output
 
-        # 返回特征、各专家输出和相加后的结果
+        # 如果处于第二阶段模式，使用整合层
+        if self.stage2_mode:
+            # 拼接所有专家的输出
+            concat_outputs = torch.cat(expert_outputs, dim=1)  # [batch_size, total_expert_outputs]
+            # 通过整合层获得最终输出
+            combined_logits = self.integrator(concat_outputs)
+
+        # 返回特征、各专家输出和相加后或整合后的结果
         return feat, expert_outputs, combined_logits
 
     def precompute_scaling_factors(self):
@@ -147,7 +162,7 @@ class MoE4Model(nn.Module):
             weight = expert.get_last_layer_weights()
             if weight is not None:
                 # 计算权重的平方范数 ||w||²
-                weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(0.05).mean()
+                weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(0.01).mean()
                 log_message(f"专家 {i} 的权重平方范数: {weight_norm_squared.item():.4f}")
                 expert_weights.append(weight_norm_squared)
             else:
@@ -180,12 +195,10 @@ class MoE4Model(nn.Module):
         """
         推理模式：根据Model design.md中的公式计算每个类别的输出logits
         使用预计算的缩放因子来提高效率
+        第二阶段训练后，使用整合层进行推理
         """
         feat = self.backbone(x)
         batch_size = x.size(0)
-
-        # 创建一个全零的输出张量
-        combined_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
 
         # 获取每个专家的原始输出
         expert_outputs = []
@@ -193,9 +206,19 @@ class MoE4Model(nn.Module):
             expert_output = expert(feat)
             expert_outputs.append(expert_output)
 
+        # 如果处于第二阶段模式，使用整合层
+        if self.stage2_mode:
+            # 拼接所有专家的输出
+            concat_outputs = torch.cat(expert_outputs, dim=1)  # [batch_size, total_expert_outputs]
+            # 通过整合层获得最终输出
+            combined_logits = self.integrator(concat_outputs)
+            return expert_outputs, combined_logits
+
+        # 创建一个全零的输出张量
+        combined_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
+
         # 使用缓存的缩放因子(如果已经预计算)
         if not self.has_cached_computation:
-            # 如果尚未预计算，则使用原始方法
             # 获取各专家最后一层全连接层的权重
             expert_weights = []
 
@@ -258,6 +281,28 @@ class MoE4Model(nn.Module):
                         combined_logits[:, c] = mean_output
 
         return expert_outputs, combined_logits
+
+    def enable_stage2_mode(self):
+        """启用第二阶段训练模式"""
+        self.stage2_mode = True
+        # 冻结backbone和所有专家的参数
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
+        for expert in self.experts:
+            for param in expert.parameters():
+                param.requires_grad = False
+
+        # 仅允许整合层的参数可训练
+        for param in self.integrator.parameters():
+            param.requires_grad = True
+
+        log_message("已启用第二阶段训练模式，冻结backbone和专家参数，仅训练整合层")
+
+    def disable_stage2_mode(self):
+        """禁用第二阶段训练模式"""
+        self.stage2_mode = False
+        log_message("已禁用第二阶段训练模式，恢复原始推理方式")
 
     def compute_loss(self, logits, targets, expert_idx):
         """
