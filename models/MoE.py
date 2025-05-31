@@ -162,7 +162,7 @@ class MoE4Model(nn.Module):
             weight = expert.get_last_layer_weights()
             if weight is not None:
                 # 计算权重的平方范数 ||w||²
-                weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(0.01).mean()
+                weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(0.0005).mean()
                 log_message(f"专家 {i} 的权重平方范数: {weight_norm_squared.item():.4f}")
                 expert_weights.append(weight_norm_squared)
             else:

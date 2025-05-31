@@ -197,7 +197,7 @@ def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANG
     # 由于类别数量较多，可以尝试分块可视化混淆矩阵
     # 1. 首先保存完整的混淆矩阵
     plt.figure(figsize=(16, 14))
-    sns.heatmap(cm_normalized, cmap="YlGnBu", vmin=0, vmax=1)
+    sns.heatmap(cm_normalized, cmap="Reds", vmin=0, vmax=1)
     plt.xlabel('Predicted Label')
     plt.ylabel('True Label')
     plt.title('Normalized Confusion Matrix (Full)')
@@ -226,12 +226,12 @@ def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANG
 
             # 使用间隔标签绘制热图
             sns.heatmap(cm_normalized[start_class:end_class + 1, :],
-                        cmap="YlGnBu", vmin=0, vmax=0.5,
+                        cmap="Reds", vmin=0, vmax=0.5,
                         yticklabels=sparse_labels)
         else:
             # 类别数量不多时正常显示所有标签
             sns.heatmap(cm_normalized[start_class:end_class + 1, :],
-                        cmap="YlGnBu", vmin=0, vmax=0.5,
+                        cmap="Reds", vmin=0, vmax=0.5,
                         yticklabels=y_labels)
 
         plt.xlabel('Predicted Label')
@@ -241,8 +241,9 @@ def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANG
         plt.close()
 
     # 保存原始混淆矩阵数据以便进一步分析
-    np.save(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix.npy", cm)
-    np.save(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix_normalized.npy", cm_normalized)
+    # 将混淆矩阵保存为CSV文件，使用pandas DataFrame
+    pd.DataFrame(cm).to_csv(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix.csv")
+    pd.DataFrame(cm_normalized).to_csv(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix_normalized.csv")
 
     return cm, cm_normalized
 
@@ -370,7 +371,7 @@ def analyze_misclassified(cm, cm_normalized, class_ranges):
 
     # 可视化专家间的错误流动
     plt.figure(figsize=(10, 8))
-    sns.heatmap(expert_flow_norm, annot=True, fmt=".2%", cmap="YlGnBu",
+    sns.heatmap(expert_flow_norm, annot=True, fmt=".2%", cmap="Reds",
                 xticklabels=[f"Expert {i + 1}" for i in range(len(class_ranges))],
                 yticklabels=[f"Expert {i + 1}" for i in range(len(class_ranges))])
     plt.xlabel('Predicted Expert')
