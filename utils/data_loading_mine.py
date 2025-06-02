@@ -8,7 +8,7 @@ from torchvision import datasets, transforms
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/52"
+RESULTS_PATH = "./results/AppClassNet/top200/MoE/57"
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -19,10 +19,10 @@ os.makedirs(f"{RESULTS_PATH}/logs", exist_ok=True)
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 # 优化超参数
-BATCH_SIZE = 2048  # 批次大小
-CLASS_RANGES = [(0, 199), (100, 199), (150, 199)]  # 专家类别范围
+BATCH_SIZE = 1024  # 批次大小
+CLASS_RANGES = [(0, 99), (100, 149), (150, 199)]  # 专家类别范围
 NUM_CLASSES = 200
-NUM_WORKERS = 4  # 数据加载的worker数量
+NUM_WORKERS = 2  # 数据加载的worker数量
 PIN_MEMORY = True  # 确保启用pin_memory
 PREFETCH_FACTOR = 4  # 增加预取因子
 
@@ -78,22 +78,22 @@ def get_dataloaders(class_ranges, dataset_path=DATASET_PATH):
         # 训练集划分
         train_indices = torch.where((train_y >= start_class) & (train_y <= end_class))[0]
         train_subset_x = train_x[train_indices]
-        train_subset_y = train_y[train_indices]
-        # train_subset_y = train_y[train_indices] - start_class  # 调整标签使其从0开始
+        # train_subset_y = train_y[train_indices]
+        train_subset_y = train_y[train_indices] - start_class  # 调整标签使其从0开始
         train_subsets.append(TensorDataset(train_subset_x, train_subset_y))
 
         # 验证集划分
         val_indices = torch.where((val_y >= start_class) & (val_y <= end_class))[0]
         val_subset_x = val_x[val_indices]
-        val_subset_y = val_y[val_indices]
-        # val_subset_y = val_y[val_indices] - start_class  # 调整标签使其从0开始
+        # val_subset_y = val_y[val_indices]
+        val_subset_y = val_y[val_indices] - start_class  # 调整标签使其从0开始
         val_subsets.append(TensorDataset(val_subset_x, val_subset_y))
 
         # 测试集划分
         test_indices = torch.where((test_y >= start_class) & (test_y <= end_class))[0]
         test_subset_x = test_x[test_indices]
-        test_subset_y = test_y[test_indices]
-        # test_subset_y = test_y[test_indices] - start_class  # 调整标签使其从0开始
+        # test_subset_y = test_y[test_indices]
+        test_subset_y = test_y[test_indices] - start_class  # 调整标签使其从0开始
         test_subsets.append(TensorDataset(test_subset_x, test_subset_y))
 
     # 创建数据加载器

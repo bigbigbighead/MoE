@@ -3,22 +3,21 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from models.ResNet import resnet18
+from models.ResNet import resnet34, resnet18  # 修改为使用resnet34
 import numpy as np
 import os
-import time  # 添加time模块用于计时
-import datetime  # 添加日期时间模块用于日志文件命名
-import glob  # 添加glob模块用于查找文件
+import time
+import datetime
+import glob
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "results/AppClassNet/top50/ResNet/4"  # 修改路径反映处理前100类
-PRETRAINED_MODEL_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练模型路径
+RESULTS_PATH = "results/AppClassNet/top200/ResNet/6"  # 修改路径反映ResNet34
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
-os.makedirs(f"{RESULTS_PATH}/param", exist_ok=True)  # 确保参数存储目录存在
-os.makedirs(f"{RESULTS_PATH}/logs", exist_ok=True)  # 确保日志存储目录存在
+os.makedirs(f"{RESULTS_PATH}/param", exist_ok=True)
+os.makedirs(f"{RESULTS_PATH}/logs", exist_ok=True)
 
 # 创建日志文件
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -34,67 +33,34 @@ def log_message(message, log_file=LOG_FILE):
 
 
 # 超参数
-BATCH_SIZE = 1024
+BATCH_SIZE = 2048  # 调小批量大小，因为ResNet34比ResNet18参数更多
 EPOCHS = 1000
 LEARNING_RATE = 0.001
-NUM_CLASSES = 50  # 修改为只处理前10类
+NUM_CLASSES = 100  # 处理前n类
 
 
-# 加载预训练模型并冻结参数
-def load_pretrained_model(pretrained_path, num_classes=200):
+# 初始化新的ResNet18模型
+def initialize_model(num_classes):
     """
-    加载预训练的ResNet18模型，冻结除最后一层外的所有参数
+    初始化新的ResNet34模型
 
     Args:
-        pretrained_path: 预训练模型路径
-        num_classes: 新的分类数量
+        num_classes: 分类数量
 
     Returns:
-        model: 加载了预训练参数并冻结了部分层的模型
+        model: 新初始化的ResNet34模型
     """
-    # 初始化新模型
     model = resnet18(num_classes=num_classes)
-
-    # 加载预训练权重
-    if os.path.isfile(pretrained_path):
-        log_message(f"加载预训练模型: {pretrained_path}")
-        checkpoint = torch.load(pretrained_path)
-
-        # 检查加载的是模型状态字典还是完整检查点
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            pretrained_dict = checkpoint['model_state_dict']
-        else:
-            pretrained_dict = checkpoint
-
-        # 过滤掉最后一个全连接层的参数
-        model_dict = model.state_dict()
-        pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'fc' not in k and k in model_dict}
-
-        # 更新当前模型的参数
-        model_dict.update(pretrained_dict)
-        model.load_state_dict(model_dict)
-
-        log_message("成功加载预训练权重（除最后一层分类层）")
-    else:
-        log_message(f"找不到预训练模型: {pretrained_path}, 将使用随机初始化的模型")
-
-    # 冻结除了fc层以外的所有层
-    for name, param in model.named_parameters():
-        if 'fc' not in name:
-            param.requires_grad = False
-            log_message(f"冻结参数层: {name}")
-        else:
-            log_message(f"可训练参数层: {name}")
+    log_message(f"初始化新的ResNet18模型，分类数: {num_classes}")
 
     # 打印可训练参数数量
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
-    log_message(f"可训练参数: {trainable_params}, 总参数: {total_params}, 比例: {trainable_params / total_params:.4%}")
+    log_message(f"模型总参数: {total_params:,}")
 
     return model
 
 
-# 加载数据集并筛选前100类
+# 加载数据集并筛选前NUM_CLASSES类
 def load_data(split, top_num=50):
     x = np.load(f"{DATASET_PATH}/{split}_x.npy")
     y = np.load(f"{DATASET_PATH}/{split}_y.npy")
@@ -103,7 +69,7 @@ def load_data(split, top_num=50):
     message = f"{split} 原始数据形状: {x.shape}, 标签形状: {y.shape}"
     log_message(message)
 
-    # 筛选前100类的数据
+    # 筛选前NUM_CLASSES类的数据
     mask = y < top_num
     x = x[mask]
     y = y[mask]
@@ -256,23 +222,22 @@ def load_checkpoint(checkpoint_path=None, model=None, optimizer=None):
 
 if __name__ == "__main__":
     # 记录训练开始信息和配置信息
-    log_message(f"=== 迁移学习训练开始于 {current_time} ===")
+    log_message(f"=== 从头开始训练ResNet34，开始于 {current_time} ===")
     log_message(f"BatchSize: {BATCH_SIZE}, Learning Rate: {LEARNING_RATE}, Epochs: {EPOCHS}")
     log_message(f"数据集路径: {DATASET_PATH} (仅使用前{NUM_CLASSES}类)")
     log_message(f"结果保存路径: {RESULTS_PATH}")
-    log_message(f"预训练模型路径: {PRETRAINED_MODEL_PATH}")
     log_message(f"使用设备: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
 
     train_x, train_y = load_data("train", NUM_CLASSES)
     valid_x, valid_y = load_data("valid", NUM_CLASSES)
-    test_x, test_y = load_data("test", NUM_CLASSES)  # 加载测试集数据
+    test_x, test_y = load_data("test", NUM_CLASSES)
 
     # 打印数据形状，用于调试
     log_message(f"最终数据形状 - 训练集: {train_x.shape}, 验证集: {valid_x.shape}, 测试集: {test_x.shape}")
 
     train_dataset = torch.utils.data.TensorDataset(train_x, train_y)
     val_dataset = torch.utils.data.TensorDataset(valid_x, valid_y)
-    test_dataset = torch.utils.data.TensorDataset(test_x, test_y)  # 创建测试集数据集
+    test_dataset = torch.utils.data.TensorDataset(test_x, test_y)
 
     train_loader = DataLoader(
         train_dataset,
@@ -280,14 +245,15 @@ if __name__ == "__main__":
         shuffle=True,
         num_workers=12,
         pin_memory=True,
-        prefetch_factor=2
+        prefetch_factor=8
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=12,
-        pin_memory=True
+        pin_memory=True,
+        prefetch_factor=8
     )
 
     test_loader = DataLoader(
@@ -295,23 +261,29 @@ if __name__ == "__main__":
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=12,
-        pin_memory=True
+        pin_memory=True,
+        prefetch_factor=8
     )
 
-    # 初始化模型 - 替换为加载预训练模型并冻结参数的版本
+    # 初始化模型 - 替换为从头初始化ResNet34
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_pretrained_model(PRETRAINED_MODEL_PATH, NUM_CLASSES).to(device)
+    model = initialize_model(NUM_CLASSES).to(device)
 
-    # 损失函数和优化器 - 只优化fc层的参数
+    # 损失函数和优化器 - 对所有参数进行优化，因为是从头训练
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=LEARNING_RATE)
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+    # 可以考虑添加学习率调度器，从头训练时很有用
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5, verbose=True)
 
     start_epoch = 0
     best_val_acc = 0.0
 
+    # 检查是否有检查点以继续训练
+    start_epoch, best_val_acc, model, optimizer = load_checkpoint(None, model, optimizer)
+
     # 记录模型信息
-    log_message(f"模型: ResNet18（迁移学习）, 分类数: {NUM_CLASSES}")
-    log_message(f"只训练最后一层全连接分类层，其他层参数冻结")
+    log_message(f"模型: ResNet34（从头训练）, 分类数: {NUM_CLASSES}")
     log_message("=" * 50)
 
     # 训练循环
@@ -320,18 +292,23 @@ if __name__ == "__main__":
         val_loss, val_acc, val_time = validate(model, val_loader, criterion, device)
         test_loss, test_acc, test_time = validate(model, test_loader, criterion, device)
 
+        # 更新学习率调度器
+        scheduler.step(val_loss)
+
         epoch_message = f"Epoch {epoch + 1}/{EPOCHS}"
         train_message = f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Time: {train_time:.2f}s"
         val_message = f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Time: {val_time:.2f}s"
         test_message = f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%, Time: {test_time:.2f}s"
+        lr_message = f"当前学习率: {optimizer.param_groups[0]['lr']:.6f}"
 
         log_message(epoch_message)
         log_message(train_message)
         log_message(val_message)
         log_message(test_message)
+        log_message(lr_message)
         log_message("-" * 50)
 
-        # 保存模型 (最好有个目录来存储)
+        # 保存模型
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             # 保存更多信息以便恢复训练
@@ -339,6 +316,7 @@ if __name__ == "__main__":
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),  # 保存学习率调度器状态
                 'best_val_acc': best_val_acc,
                 'val_loss': val_loss,
                 'train_loss': train_loss
@@ -353,6 +331,7 @@ if __name__ == "__main__":
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),  # 保存学习率调度器状态
                 'best_val_acc': best_val_acc,
                 'val_loss': val_loss,
                 'train_loss': train_loss

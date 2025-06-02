@@ -293,7 +293,7 @@ class MoE4Model(nn.Module):
             for param in expert.parameters():
                 param.requires_grad = False
 
-        # 仅允许整合层的参数可训练
+        # 仅允许整��层的参数可训练
         for param in self.integrator.parameters():
             param.requires_grad = True
 
@@ -371,7 +371,7 @@ class Router(nn.Module):
         self.router = nn.Linear(feat_dim, num_experts)
 
     def forward(self, x):
-        x = self.dropout(x)  # 在预测前应用dropout
+        x = self.dropout(x)  # 在预测前��用dropout
         router_logits = self.router(x)
 
         if self.routing_type == 'softmax':
@@ -469,4 +469,185 @@ class MoEResNet18(nn.Module):
         """返回预测的类别"""
         logits = self.inference(x)
         _, predicted = torch.max(logits, 1)
+        return predicted
+
+
+class CoarseExpertModel(nn.Module):
+    """按照Model design v3实现的模型，包含一个粗分类器和多个专家"""
+
+    def __init__(self, total_classes=200, class_ranges=None,
+                 input_channels=1, input_height=1, input_width=1024, dropout_rate=0):
+        super().__init__()
+
+        # 默认类别范围划分：0-99, 100-149, 150-199
+        if class_ranges is None:
+            class_ranges = [(0, 99), (100, 149), (150, 199)]
+
+        self.class_ranges = class_ranges
+        self.num_experts = len(class_ranges)
+        self.total_classes = total_classes
+        self.dropout_rate = dropout_rate
+
+        # 创建粗分类器 - 使用ResNet18作为backbone
+        self.coarse_classifier = resnet18_backbone(
+            input_channels=input_channels,
+            input_height=input_height,
+            input_width=input_width,
+            dropout_rate=dropout_rate
+        )
+
+        # 粗分类器输出层 - 输出专家索引
+        self.coarse_fc = nn.Linear(self.coarse_classifier.feat_dim, self.num_experts)
+
+        # 创建多个专家模型 - 每个专家是一个完整的ResNet18
+        self.experts = nn.ModuleList()
+        for expert_idx, class_range in enumerate(self.class_ranges):
+            start_class, end_class = class_range
+            num_classes = end_class - start_class + 1
+
+            # 每个专家是一个完整的ResNet18模型
+            expert = resnet18_backbone(
+                input_channels=input_channels,
+                input_height=input_height,
+                input_width=input_width,
+                dropout_rate=dropout_rate
+            )
+            # 添加专家的分类层
+            expert_classifier = nn.Linear(expert.feat_dim, num_classes)
+
+            # 将backbone和分类器组合为一个模块
+            expert_model = nn.Sequential(
+                expert,
+                expert_classifier
+            )
+
+            self.experts.append(expert_model)
+
+        # 为每个类别记录负责的专家索引
+        self.class_to_expert = {}
+        for c in range(total_classes):
+            for i, (start, end) in enumerate(self.class_ranges):
+                if start <= c <= end:
+                    self.class_to_expert[c] = i
+                    break
+
+        # 训练阶段标识
+        self.training_coarse = True  # True: 训练粗分类器，False: 训练专家
+
+        # 缓存专家范围，用于加速推理
+        self.cached_expert_ranges = [(start, end) for start, end in class_ranges]
+
+    def forward(self, x):
+        # 粗分类器输出
+        coarse_feat = self.coarse_classifier(x)
+        coarse_logits = self.coarse_fc(coarse_feat)
+
+        # 如果是训练粗分类器阶段，只返回粗分类器的输出
+        if self.training_coarse and self.training:
+            return coarse_logits, None
+
+        # 获取专家预测
+        if self.training:
+            # 训练时使用teacher forcing，即根据样本的真实标签选择专家
+            # 这个逻辑需要在训练脚本中实现，这里仅返回所有专家的输出
+            batch_size = x.size(0)
+            expert_outputs = []
+            for expert in self.experts:
+                expert_output = expert(x)
+                expert_outputs.append(expert_output)
+
+            return coarse_logits, expert_outputs
+        else:
+            # 推理时根据粗分类器结果选择专家
+            # 获取每个样本最可能的专家索引
+            batch_size = x.size(0)
+            _, expert_indices = torch.max(coarse_logits, dim=1)
+
+            # 收集每个样本的专家预测结果
+            final_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
+
+            # 优化：按专家批量处理，而不是单个样本
+            for expert_idx in range(self.num_experts):
+                # 找到应该由当前专家处理的样本索引
+                expert_samples = (expert_indices == expert_idx).nonzero(as_tuple=True)[0]
+                if len(expert_samples) == 0:
+                    continue
+
+                # 获取该专家负责的类别范围
+                start_class, end_class = self.cached_expert_ranges[expert_idx]
+
+                # 批量处理样本
+                expert_output = self.experts[expert_idx](x[expert_samples])
+
+                # 将专家输出填充到最终logits中的对应位置
+                final_logits[expert_samples, start_class:end_class + 1] = expert_output
+
+            return coarse_logits, final_logits
+
+    def inference(self, x):
+        """优化的推理函数，返回最终的类别预测，批量处理相同专家的样本"""
+        # 粗分类器输出
+        with torch.no_grad():  # 明确标记不需要梯度计算
+            coarse_feat = self.coarse_classifier(x)
+            coarse_logits = self.coarse_fc(coarse_feat)
+
+            # 获取每个样本最可能的专家索引
+            batch_size = x.size(0)
+            _, expert_indices = torch.max(coarse_logits, dim=1)
+
+            # 收集每个样本的专家预测结果
+            final_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
+
+            # 按专家批量处理
+            for expert_idx in range(self.num_experts):
+                # 找到应该由当前专家处理的样本索引
+                expert_samples = (expert_indices == expert_idx).nonzero(as_tuple=True)[0]
+                if len(expert_samples) == 0:
+                    continue
+
+                # 获取该专家负责的类别范围
+                start_class, end_class = self.cached_expert_ranges[expert_idx]
+
+                # 批量处理样本
+                expert_output = self.experts[expert_idx](x[expert_samples])
+
+                # 将专家输出填充到最终logits中的对应位置
+                final_logits[expert_samples, start_class:end_class + 1] = expert_output
+
+        return final_logits
+
+    def set_training_mode(self, train_coarse=True):
+        """设置训练模式：训练粗分类器还是专家"""
+        self.training_coarse = train_coarse
+
+        # 根据训练模式冻结相应的参数
+        if train_coarse:
+            # 训练粗分类器，冻结专家参数
+            for expert in self.experts:
+                for param in expert.parameters():
+                    param.requires_grad = False
+
+            # 解冻粗分类器参数
+            for param in self.coarse_classifier.parameters():
+                param.requires_grad = True
+            self.coarse_fc.weight.requires_grad = True
+            self.coarse_fc.bias.requires_grad = True
+        else:
+            # 训练专家，冻结粗分类器参数
+            for param in self.coarse_classifier.parameters():
+                param.requires_grad = False
+            self.coarse_fc.weight.requires_grad = False
+            self.coarse_fc.bias.requires_grad = False
+
+            # 解冻专家参数
+            for expert in self.experts:
+                for param in expert.parameters():
+                    param.requires_grad = True
+
+        return self
+
+    def predict(self, x):
+        """返回预测的类别"""
+        final_logits = self.inference(x)
+        _, predicted = torch.max(final_logits, 1)
         return predicted
