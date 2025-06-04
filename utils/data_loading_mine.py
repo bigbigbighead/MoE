@@ -19,7 +19,7 @@ os.makedirs(f"{RESULTS_PATH}/logs", exist_ok=True)
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
 # 优化超参数
-BATCH_SIZE = 1024  # 批次大小
+BATCH_SIZE = 2048  # 批次大小
 CLASS_RANGES = [(0, 99), (100, 149), (150, 199)]  # 专家类别范围
 NUM_CLASSES = 200
 NUM_WORKERS = 2  # 数据加载的worker数量
