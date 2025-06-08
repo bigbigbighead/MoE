@@ -11,7 +11,7 @@ class SpecializedExpert(nn.Module):
     直接包含独享的深层网络和全连接分类层
     """
 
-    def __init__(self, feat_dim, num_classes, input_channels=1, input_height=1, input_width=1024, dropout_rate=0.2):
+    def __init__(self, feat_dim, num_classes, input_channels=1, input_height=1, input_width=1024, dropout_rate=0):
         """
         Args:
             feat_dim: 特征维度
@@ -57,7 +57,7 @@ class SpecializedExpert(nn.Module):
 class MoE_ACE(nn.Module):
     """
     Mixture of Experts - Additive Cooperative Experts (MoE-ACE)
-    
+
     按照MoE-ACE.md的设计：
     - 模型的backbone是ResNet-18，由多个专家组成
     - 每个专家共享浅层（前2个残差块）而独享深层（后两个残差块）
@@ -169,16 +169,16 @@ class MoE_ACE(nn.Module):
     def compute_loss(self, outputs, targets, expert_idx):
         """
         计算专家的损失函数，按照MoE-ACE.md的设计
-        
+
         L_cls = 交叉熵损失 (目标类别)
         L_com = 干扰类别logits的L2范数
         L = L_cls + L_com
-        
+
         Args:
             outputs: 专家输出的logits，维度为 [batch_size, total_classes]
             targets: 相对于该专家负责类别范围的标签，维度为 [batch_size]
             expert_idx: 专家索引
-            
+
         Returns:
             cls_loss: 分类损失 (L_cls)
             reg_loss: 正则化损失 (L_com)
@@ -219,22 +219,33 @@ class MoE_ACE(nn.Module):
     def precompute_scaling_factors(self):
         """
         预计算所有专家的缩放因子并存储
-        
+
         根据MoE-ACE.md:
         ẑ_i = (||w_1||²/||w_i||²)·z_i
         w_i为专家i的全连接层权重
         w_1为第一个专家的全连接层权重
+
+        修改：每个专家只计算其负责类别范围内权重的范数平均值
         """
         # 获取各专家最后一层全连接层的权重
         expert_weights = []
 
-        # 计算每个专家的权重平方范数
+        # 计算每个专家的权重范数，只考虑其负责的类别范围
         for i, expert in enumerate(self.experts):
             weight = expert.get_last_layer_weights()
             if weight is not None:
-                # 计算权重的平方范数 ||w||²
-                weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(2).mean()
-                log_message(f"专家 {i} 的权重平方范数: {weight_norm_squared.item():.4f}")
+                start_class, end_class = self.class_ranges[i]
+
+                # 只选择专家负责的类别权重
+                responsible_weights = weight[start_class:end_class + 1]
+
+                # 计算权重的范数 ||w||
+                tao = 1
+                weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(tao).mean()
+                # log_message(
+                #     f"专家 {i} 的{tao}次幂缩放权重范数(只考虑负责类别范围[{start_class}-{end_class}]): {weight_norm_squared.item():.4f}")
+                log_message(
+                    f"专家 {i} 的{tao}次幂缩放权重范数: {weight_norm_squared.item():.4f}")
                 expert_weights.append(weight_norm_squared)
             else:
                 # 如果无法获取权重，则使用默认值1.0
@@ -254,7 +265,7 @@ class MoE_ACE(nn.Module):
                 class_scaling_factors = []
                 for expert_idx in responsible_experts:
                     # 缩放因子 = ||w_1||²/||w_i||²
-                    scaling_factor = reference_weight_norm / expert_weights[expert_idx]
+                    scaling_factor = expert_weights[expert_idx] / reference_weight_norm
                     class_scaling_factors.append((expert_idx, scaling_factor.item()))
                 scaling_factors_dict[c] = class_scaling_factors
 
@@ -267,7 +278,7 @@ class MoE_ACE(nn.Module):
     def inference(self, x):
         """
         模型推理，根据MoE-ACE.md中的公式计算输出
-        
+
         o^c = (1/|S_c|)∑_{ε_i∈S_c}ẑ_i
         ẑ_i = (||w_1||²/||w_i||²)·z_i
         """
@@ -309,11 +320,17 @@ class MoE_ACE(nn.Module):
             # 获取各专家最后一层全连接层的权重
             expert_weights = []
 
-            # 计算每个专家的权重平方范数
-            for expert in self.experts:
+            # 计算每个专家的权重范数，只考虑其负责的类别范围
+            for i, expert in enumerate(self.experts):
                 weight = expert.get_last_layer_weights()
                 if weight is not None:
-                    weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(2).mean()
+                    start_class, end_class = self.class_ranges[i]
+
+                    # 只选择专家负责的类别权重
+                    responsible_weights = weight[start_class:end_class + 1]
+
+                    # 计算负责类别范围内权重的平方范数平均值
+                    weight_norm_squared = torch.norm(responsible_weights, p=2, dim=1).pow(2).mean()
                     expert_weights.append(weight_norm_squared)
                 else:
                     expert_weights.append(torch.tensor(1.0, device=x.device))
