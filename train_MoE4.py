@@ -12,7 +12,7 @@ from torch.cuda.amp import autocast, GradScaler
 from models.MoE import MoE4Model
 from models.ResNet import resnet18
 
-from utils.data_loading_mine import log_message, load_data, get_dataloaders, ROUTING_TYPE
+from utils.data_loading_mine import log_message, load_data, get_dataloaders, RESULTS_PATH
 from utils.load_model import load_pretrained_weights, load_checkpoint
 from utils.loss_functions import compute_specialized_loss, combine_expert_outputs
 from utils.visualization import log_metrics_to_tensorboard, plot_loss_curves, plot_accuracy_curves, \
@@ -22,7 +22,6 @@ from validate_model import validate_expert, validate_full_model, validate_router
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "./results/AppClassNet/top200/MoE/31"
 # 预训练模型路径
 PRETRAINED_RESNET18_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练ResNet18模型路径
 
@@ -166,7 +165,7 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
                         cls_loss, reg_loss, total_loss = model.compute_loss(outputs, targets, expert_idx)
 
                     # 使用scaler进行反向传播和优化
-                    scaler.scale(total_loss).backward()
+                    scaler.scale(cls_loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
                 else:
@@ -273,7 +272,7 @@ def train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume
                 }, best_checkpoint_path)
                 log_message(f"  已保存专家{expert_idx}的最佳模型，验证准确率: {best_val_acc:.4f}")
 
-            # 定期保存阶段性检查点
+            # 定期保存���段性检查点
             if (epoch + 1) % 10 == 0 or (epoch + 1) == EPOCHS_STAGE1:
                 epoch_checkpoint_path = os.path.join(RESULTS_PATH, 'param',
                                                      f'stage1_expert{expert_idx}_epoch{epoch + 1}.pth')
@@ -373,7 +372,7 @@ def validate_expert(model, val_loader, criterion, expert_idx, device):
 
 
 # 优化评估函数，确保正确使用推理方法
-def evaluate_ensemble_model(model, val_loader, test_loader, device, FLAG=True):
+def evaluate_ensemble_model(model, val_loader, test_loader, device, FLAG=True, alpha1=0.0, alpha2=0.0):
     """
     评估整体模型性能
     采用Model design.md中定义的推理输出方式：直接组合各专家的输出
@@ -383,13 +382,15 @@ def evaluate_ensemble_model(model, val_loader, test_loader, device, FLAG=True):
     criterion = nn.CrossEntropyLoss()
     # 评估验证集
     val_start_time = time.time()
-    val_loss, val_accuracy = validate_full_model(model, val_loader, criterion, device, RESULTS_PATH, FLAG)
+    val_loss, val_accuracy = validate_full_model(model, val_loader, criterion, device, RESULTS_PATH, FLAG, alpha1,
+                                                 alpha2)
     val_time = time.time() - val_start_time
     log_message(f"验证集性能 - 损失: {val_loss:.4f}, 准确率: {val_accuracy:.4f}, 耗时: {val_time:.2f}s")
 
     # 评估测试集
     test_start_time = time.time()
-    test_loss, test_accuracy = validate_full_model(model, test_loader, criterion, device, RESULTS_PATH, FLAG)
+    test_loss, test_accuracy = validate_full_model(model, test_loader, criterion, device, RESULTS_PATH, FLAG, alpha1,
+                                                   alpha2)
     test_time = time.time() - test_start_time
     log_message(f"测试集性能 - 损失: {test_loss:.4f}, 准确率: {test_accuracy:.4f}, 耗时: {test_time:.2f}s")
 
@@ -416,7 +417,6 @@ if __name__ == "__main__":
     log_message(f"自动混合精度: {USE_AMP}")
     log_message(f"工作进程数: {NUM_WORKERS}")
     log_message(f"专家数量: {NUM_EXPERTS}")
-    log_message(f"路由类型: {ROUTING_TYPE}")
     log_message(f"类别范围: {CLASS_RANGES}")
     log_message(f"预训练模型路径: {PRETRAINED_RESNET18_PATH}")
 
@@ -464,8 +464,8 @@ if __name__ == "__main__":
     # 训练专家
     model = train_stage1(model, train_loaders, val_loaders, test_loaders, device, resume_training=RESUME_TRAINING)
 
-    # 评估整体模型
-    val_accuracy, test_accuracy = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device, False)
+    # 评估整体模型，这里会输出一次统计信息和权重范数
+    val_accuracy, test_accuracy = evaluate_ensemble_model(model, full_val_loader, full_test_loader, device, True)
 
     # 记录最终结果
     log_message(f"训练完成！")

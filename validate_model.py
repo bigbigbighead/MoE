@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,6 +6,42 @@ import numpy as np
 from utils.loss_functions import compute_specialized_loss, combine_expert_outputs
 from utils.data_loading_mine import log_message
 from utils.visualization import plot_expert_logits_histograms
+
+
+# 计算专家分类器最后一层权重的L2范数
+def calculate_expert_weight_norms(model):
+    """
+    计算每个专家分类器最后一层权重的L2范数
+
+    Args:
+        model: MoE模型
+
+    Returns:
+        list: 每个专家最后一层权重的L2范数
+    """
+    expert_weights = []
+
+    # 处理可能的DataParallel封装
+    if hasattr(model, 'module'):
+        experts = model.module.experts
+    else:
+        experts = model.experts
+
+    # 计算每个专家的权重平方范数
+    for i, expert in enumerate(experts):
+        weight = expert.get_last_layer_weights()
+        if weight is not None:
+            # 计算权重的平方范数 ||w||²
+            tao = 1
+            weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(tao).mean()
+            log_message(f"专家 {i} 的{tao}次幂权重平方范数: {weight_norm_squared.item():.4f}")
+            expert_weights.append(weight_norm_squared)
+        else:
+            # 如果无法获取权重，则使用默认值1.0
+            log_message(f"专家 {i} 无法获取权重，使用默认值1.0")
+            expert_weights.append(torch.tensor(1.0, device=weight.device if weight is not None else 'cpu'))
+
+    return expert_weights
 
 
 # 验证单个专家的性能
@@ -39,8 +76,6 @@ def validate_expert(model, val_loader, criterion, expert_idx, device):
     with torch.no_grad():
         for inputs, targets in val_loader:
             inputs, targets = inputs.to(device), targets.to(device)
-
-            # 获取特征
             if hasattr(model, 'module'):
                 features = model.module.backbone(inputs)
                 outputs = model.module.experts[expert_idx](features)
@@ -74,71 +109,191 @@ def validate_expert(model, val_loader, criterion, expert_idx, device):
 
 
 # 验证完整模型的性能
-def validate_full_model(model, val_loader, criterion, device, RESULTS_PATH, FLAG=True):
+def validate_full_model(model, val_loader, criterion, device, result_path=None, FLAG=True, alpha1=0.0, alpha2=0.0,
+                        output_stats=True, output_weight_norms=True):
     """
     验证完整模型的性能
 
-    按照Model design.md，推理输出公式为:
-    o^c = (1/|S_c|) * sum(z_i)，其中z_i是专家i对类别c的输出
-    在本模型中，由于专家责任范围互不重叠，每个类别只由一个专家负责，公式简化为直接取专家输出
+    Args:
+        model: 模型
+        val_loader: 验证数据加载器
+        criterion: 损失函数
+        device: 计算设备
+        result_path: 结果保存路径
+        FLAG: 是否打印详细信息和保存可视化结果
+        alpha1: 专家1的权重系数
+        alpha2: 专家2的权重系数
+        output_stats: 是否输出专家logits统计信息
+        output_weight_norms: 是否输出专家权重范数
+
+    Returns:
+        tuple: (平均损失, 准确率)
     """
     model.eval()
     val_loss = 0
     correct = 0
     total = 0
+    batch_count = 0
 
-    # 统计每个专家的logits范围
-    expert_logits_stats = []
-    for i in range(len(model.experts) if not hasattr(model, 'module') else len(model.module.experts)):
-        expert_logits_stats.append({
-            'min': float('inf'),
-            'max': float('-inf'),
-            'mean': [],
-            'std': []
-        })
+    # 预测结果和真实标签存储
+    all_preds = []
+    all_targets = []
 
+    # 为每个专家初始化统计信息收集器 - 使用列表存储而非嵌套字典，提高效率
+    num_experts = len(model.experts) if not hasattr(model, 'module') else len(model.module.experts)
+    expert_means = [[] for _ in range(num_experts)]
+    expert_stds = [[] for _ in range(num_experts)]
+    expert_maxs = [[] for _ in range(num_experts)]
+    expert_mins = [[] for _ in range(num_experts)]
+    expert_all_logits = [[] for _ in range(num_experts)]
+
+    # 批处理预测和统计
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(val_loader):
+            batch_count += 1
             inputs, targets = inputs.to(device), targets.to(device)
 
-            # 使用inference方法获取模型预测（确保使用正确的推理逻辑）
-            expert_outputs, logits = model.inference(inputs)
+            # 使用指定的α1和α2进行推理
+            if hasattr(model, 'module'):
+                expert_outputs, combined_outputs = model.module.inference(inputs, alpha1, alpha2)
+            else:
+                expert_outputs, combined_outputs = model.inference(inputs, alpha1, alpha2)
 
-            # 只对第一个batch的数据进行可视化
-            if batch_idx == 0:
-                plot_expert_logits_histograms(expert_outputs, RESULTS_PATH)
+            # 高效统计每个专家logits的信息
+            if output_stats:
+                for i, logits in enumerate(expert_outputs):
+                    # 转移到CPU并转换为NumPy一次性完成
+                    logits_np = logits.detach().cpu().numpy()
 
-            # 统计每个专家的logits范围
-            for i, expert_output in enumerate(expert_outputs):
-                expert_logits = expert_output.detach().cpu().numpy()
-                expert_logits_stats[i]['min'] = min(expert_logits_stats[i]['min'], np.min(expert_logits))
-                expert_logits_stats[i]['max'] = max(expert_logits_stats[i]['max'], np.max(expert_logits))
-                expert_logits_stats[i]['mean'].append(np.mean(expert_logits))
-                expert_logits_stats[i]['std'].append(np.std(expert_logits))
+                    # 批量计算统计值
+                    mean_val = np.mean(logits_np)
+                    std_val = np.std(logits_np)
+                    max_val = np.max(logits_np)
+                    min_val = np.min(logits_np)
 
-            if FLAG and batch_idx == 0:
-                log_message(f"sample:{inputs[0]}")
-                log_message(f"logits:{logits[0]}")
-                FLAG = False
+                    # 收集统计数据
+                    expert_means[i].append(mean_val)
+                    expert_stds[i].append(std_val)
+                    expert_maxs[i].append(max_val)
+                    expert_mins[i].append(min_val)
+
+                    # 只收集需要的数据，避免内存占用过大
+                    if FLAG and result_path is not None:
+                        # 对于大批量，可以考虑采样而不是存储所有值
+                        if logits_np.size > 100000:
+                            indices = np.random.choice(logits_np.size, 10000, replace=False)
+                            expert_all_logits[i].extend(logits_np.flatten()[indices])
+                        else:
+                            expert_all_logits[i].extend(logits_np.flatten())
 
             # 计算损失
-            loss = criterion(logits, targets)
-
+            loss = criterion(combined_outputs, targets)
             val_loss += loss.item()
-            _, predicted = logits.max(1)
+
+            # 计算准确率
+            _, predicted = combined_outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
 
-    # 计算并记录每个专家的logits统计信息
-    log_message("\n专家logits统计信息:")
-    for i, stats in enumerate(expert_logits_stats):
-        # 计算全局平均值和标准差
-        global_mean = np.mean(stats['mean'])
-        global_std = np.mean(stats['std'])
-        log_message(f"专家{i + 1}: 最小值={stats['min']:.4f}, 最大值={stats['max']:.4f}, "
-                    f"平均值={global_mean:.4f}, 标准差={global_std:.4f}")
+            # 收集预测结果和真实标签（如果需要绘制混淆矩阵）
+            if FLAG and result_path is not None:
+                all_preds.extend(predicted.cpu().numpy())
+                all_targets.extend(targets.cpu().numpy())
 
-    return val_loss / len(val_loader), correct / total
+    # 计算平均损失和准确率
+    avg_loss = val_loss / batch_count
+    accuracy = correct / total
+
+    # 输出总体统计信息
+    if output_stats:
+        log_message("\n=== 专家 Logits 总体统计信息 ===")
+        for i in range(num_experts):
+            overall_mean = np.mean(expert_means[i])
+            overall_std = np.mean(expert_stds[i])
+            overall_max = np.max(expert_maxs[i])
+            overall_min = np.min(expert_mins[i])
+
+            log_message(f"Expert {i} overall stats: mean={overall_mean:.4f}, std={overall_std:.4f}, "
+                        f"max={overall_max:.4f}, min={overall_min:.4f}")
+
+            # 只有在收集了logits数据时才计算
+            if expert_all_logits[i]:
+                all_logits_mean = np.mean(expert_all_logits[i])
+                all_logits_std = np.std(expert_all_logits[i])
+                log_message(f"Expert {i} all logits: mean={all_logits_mean:.4f}, std={all_logits_std:.4f}")
+
+    # 计算并输出每个专家最后一层权重的L2范数
+    if output_weight_norms:
+        log_message("\n=== 专家最后一层权重范数 ===")
+        expert_weights = calculate_expert_weight_norms(model)
+    else:
+        expert_weights = []
+
+    # 如果提供了结果路径，保存直方图
+    if result_path is not None and FLAG and output_stats and any(expert_all_logits[0]):
+        try:
+            import matplotlib.pyplot as plt
+
+            # 为每个专家绘制logits分布直方图
+            for i in range(num_experts):
+                if not expert_all_logits[i]:
+                    continue
+
+                plt.figure(figsize=(10, 6))
+                plt.hist(expert_all_logits[i], bins=50, alpha=0.7)
+                plt.title(f'Expert {i} Logits Distribution (α1={alpha1:.2f}, α2={alpha2:.2f})')
+                plt.xlabel('Logit Values')
+                plt.ylabel('Frequency')
+                plt.grid(True, alpha=0.3)
+
+                # 确保保存路径存在
+                os.makedirs(result_path, exist_ok=True)
+                plt.savefig(os.path.join(result_path, f'expert{i}_logits_hist_a1_{alpha1:.2f}_a2_{alpha2:.2f}.png'))
+                plt.close()
+
+            # 绘制专家权重范数条形图
+            if output_weight_norms and expert_weights:
+                plt.figure(figsize=(10, 6))
+                x = np.arange(num_experts)
+                weight_values = [w.item() for w in expert_weights]
+
+                plt.bar(x, weight_values, width=0.6)
+                plt.xlabel('Expert Index')
+                plt.ylabel('Weight Norm (squared)')
+                plt.title(f'Expert Weight Norms (α1={alpha1:.2f}, α2={alpha2:.2f})')
+                plt.xticks(x, [f'Expert {i}' for i in range(num_experts)])
+                plt.grid(True, alpha=0.3)
+                plt.savefig(os.path.join(result_path, f'expert_weight_norms_a1_{alpha1:.2f}_a2_{alpha2:.2f}.png'))
+                plt.close()
+
+        except Exception as e:
+            print(f"Error generating visualizations: {str(e)}")
+
+    # 如果需要，绘制混淆矩阵
+    if result_path is not None and FLAG and all_preds and all_targets:
+        try:
+            from sklearn.metrics import confusion_matrix
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+
+            # 确保有足够的预测结果再绘制混淆矩阵
+            if len(all_preds) > 100:  # 设置一个最小阈值
+                cm = confusion_matrix(all_targets, all_preds)
+                plt.figure(figsize=(10, 8))
+                # 对于大型混淆矩阵，不显示具体数字
+                sns.heatmap(cm, annot=False, fmt='d', cmap='Blues')
+                plt.xlabel('Predicted')
+                plt.ylabel('True')
+                plt.title(f'Confusion Matrix (α1={alpha1:.2f}, α2={alpha2:.2f})')
+
+                # 确保保存路径存在
+                os.makedirs(result_path, exist_ok=True)
+                plt.savefig(os.path.join(result_path, f'confusion_matrix_a1_{alpha1:.2f}_a2_{alpha2:.2f}.png'))
+                plt.close()
+        except Exception as e:
+            print(f"Error generating confusion matrix: {str(e)}")
+
+    return avg_loss, accuracy
 
 
 # 获取专家索引
@@ -203,7 +358,7 @@ def compare_model_parameters(model1, model2, tolerance=1e-6, verbose=True):
                 avg_diff = diff.float().mean().item()
                 print(f"参数'{key}'不匹配: 最大差异={max_diff:.8f}, 平均差异={avg_diff:.8f}")
 
-                # 如果是较小的张量，打印出具体值进行比较
+                # 如果是较小的张量，打印出���体值进行比较
                 if state_dict1[key].numel() < 10:
                     print(f"  模型1: {state_dict1[key]}")
                     print(f"  模型2: {state_dict2[key]}")

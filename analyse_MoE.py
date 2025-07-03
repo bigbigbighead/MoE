@@ -7,7 +7,7 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix, classification_report
 import pandas as pd
 from models.MoE import MoE4Model
-from utils.data_loading_mine import load_data, get_dataloaders, RESULTS_PATH, NUM_CLASSES, log_message
+from utils.data_loading_mine import load_data, get_dataloaders, RESULTS_PATH, NUM_CLASSES, log_message, CLASS_RANGES
 import torch.nn as nn
 import datetime
 
@@ -18,7 +18,6 @@ plt.rcParams['axes.unicode_minus'] = True
 # 分析配置
 MODEL_PATH = f"{RESULTS_PATH}/param/final_model.pth"
 ANALYSIS_RESULTS_PATH = f"{RESULTS_PATH}/analysis"
-CLASS_RANGES = [(0, 199), (0, 99), (100, 149), (150, 199)]  # 专家负责的类别范围
 
 # 创建分析日志文件
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

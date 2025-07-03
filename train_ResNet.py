@@ -9,11 +9,13 @@ import os
 import time  # 添加time模块用于计时
 import datetime  # 添加日期时间模块用于日志文件命名
 import glob  # 添加glob模块用于查找文件
+from utils.data_loading_downsample import create_balanced_sampler, load_data  # 导入重采样函数
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "results/AppClassNet/top50/ResNet/4"  # 修改路径反映处理前100类
-PRETRAINED_MODEL_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练模型路径
+RESULTS_PATH = "results/AppClassNet/top50/ResNet/6"  # 修改路径反映处理前100类
+# 移除预训练模型路径配置
+# PRETRAINED_MODEL_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练模型路径
 
 # 确保结果目录存在
 os.makedirs(RESULTS_PATH, exist_ok=True)
@@ -33,69 +35,57 @@ def log_message(message, log_file=LOG_FILE):
     print(message)
 
 
+# 新增重采样配置
+# 可选策略：
+# 'inverse' - 按类别频率的倒数加权
+# 'sqrt' - 按类别频率的平方根的倒数加权
+# 'log' - 按类别频率对数的倒数加权
+# 'balanced' - 完全平衡采样
+# 'adaptive_performance' - 基于模型性能和类别频率的自适应采样
+# 'tiered_importance' - 基于分层重要性的采样
+# 'top_n_suppression' - 降低前n个高频类别的采样率
+# 'long_tail_boost' - 提升长尾类别的采样率
+# 'boundary_focus' - 关注类别边界上的样本
+# 'inverse_accuracy' - 按分类准确率的倒数加权
+# 'dynamic_difficulty' - 按难易程度动态调整权重
+
+SAMPLING_STRATEGY = 'top_n_suppression'  # 使用前N类抑制采样
+SAMPLING_ALPHA = 0.8  # 重采样平衡因子
+TOP_N_LIMIT = 10  # 前10个高频类别
+TOP_N_FACTOR = 0.4  # 降低前N类的采样率至40%
+RARE_BOOST_FACTOR = 2.0  # 稀有类提升因子
+
 # 超参数
 BATCH_SIZE = 1024
 EPOCHS = 1000
 LEARNING_RATE = 0.001
-NUM_CLASSES = 50  # 修改为只处理前10类
+NUM_CLASSES = 200  # 修改为只处理前200类
 
 
-# 加载预训练模型并冻结参数
-def load_pretrained_model(pretrained_path, num_classes=200):
+# 初始化新模型函数 - 替换原来的load_pretrained_model函数
+def initialize_new_model(num_classes=200):
     """
-    加载预训练的ResNet18模型，冻结除最后一层外的所有参数
+    初始化一个新的ResNet18模型，无需加载预训练参数
 
     Args:
-        pretrained_path: 预训练模型路径
-        num_classes: 新的分类数量
+        num_classes: 分类数量
 
     Returns:
-        model: 加载了预训练参数并冻结了部分层的模型
+        model: 新初始化的模型
     """
     # 初始化新模型
     model = resnet18(num_classes=num_classes)
 
-    # 加载预训练权重
-    if os.path.isfile(pretrained_path):
-        log_message(f"加载预训练模型: {pretrained_path}")
-        checkpoint = torch.load(pretrained_path)
-
-        # 检查加载的是模型状态字典还是完整检查点
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            pretrained_dict = checkpoint['model_state_dict']
-        else:
-            pretrained_dict = checkpoint
-
-        # 过滤掉最后一个全连接层的参数
-        model_dict = model.state_dict()
-        pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'fc' not in k and k in model_dict}
-
-        # 更新当前模型的参数
-        model_dict.update(pretrained_dict)
-        model.load_state_dict(model_dict)
-
-        log_message("成功加载预训练权重（除最后一层分类层）")
-    else:
-        log_message(f"找不到预训练模型: {pretrained_path}, 将使用随机初始化的模型")
-
-    # 冻结除了fc层以外的所有层
-    for name, param in model.named_parameters():
-        if 'fc' not in name:
-            param.requires_grad = False
-            log_message(f"冻结参数层: {name}")
-        else:
-            log_message(f"可训练参数层: {name}")
-
-    # 打印可训练参数数量
+    # 打印参数数量
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
-    log_message(f"可训练参数: {trainable_params}, 总参数: {total_params}, 比例: {trainable_params / total_params:.4%}")
+    log_message(f"模型参数信息 - 可训练参数: {trainable_params}, 总参数: {total_params}")
 
     return model
 
 
-# 加载数据集并筛选前100类
-def load_data(split, top_num=50):
+# 加载数据集并筛选前top_num类并应用重采样
+def load_data_with_sampling(split, top_num=200, strategy=SAMPLING_STRATEGY, alpha=SAMPLING_ALPHA):
     x = np.load(f"{DATASET_PATH}/{split}_x.npy")
     y = np.load(f"{DATASET_PATH}/{split}_y.npy")
 
@@ -103,7 +93,7 @@ def load_data(split, top_num=50):
     message = f"{split} 原始数据形状: {x.shape}, 标签形状: {y.shape}"
     log_message(message)
 
-    # 筛选前100类的数据
+    # 筛选前N类的数据
     mask = y < top_num
     x = x[mask]
     y = y[mask]
@@ -123,6 +113,47 @@ def load_data(split, top_num=50):
 
     log_message(f"{split} 处理后数据形状: {x.shape}")
     y = torch.tensor(y, dtype=torch.long)
+
+    # 只对训练集应用重采样
+    if split == "train" and strategy:
+        dataset = torch.utils.data.TensorDataset(x, y)
+        # 确保csv路径存在
+        csv_path = "./results/AppClassNet/top200/ResNet/1/analysis/class_accuracy_ResNet.csv"
+        if not os.path.exists(csv_path):
+            log_message(f"警告: 类别准确率数据文件不存在: {csv_path}, 将使用默认的'inverse'策略")
+            strategy = 'inverse'
+
+        # 根据选定的采样策略应用相应的参数
+        if strategy == 'top_n_suppression':
+            sampler = create_balanced_sampler(
+                y, strategy=strategy, alpha=alpha,
+                top_n_limit=TOP_N_LIMIT, top_n_factor=TOP_N_FACTOR
+            )
+            log_message(f"为{split}数据集创建了{strategy}重采样器，平衡因子: {alpha}, "
+                        f"降低前{TOP_N_LIMIT}类采样率至{TOP_N_FACTOR}倍")
+        elif strategy == 'long_tail_boost':
+            sampler = create_balanced_sampler(
+                y, strategy=strategy, alpha=alpha,
+                rare_boost_factor=RARE_BOOST_FACTOR
+            )
+            log_message(f"为{split}数据集创建了{strategy}重采样器，平衡因子: {alpha}, "
+                        f"稀有类提升因子: {RARE_BOOST_FACTOR}")
+        elif strategy == 'boundary_focus':
+            # 可以选择特定的边界类别，或让算法自动判断
+            boundary_classes = None  # 自动判断
+            sampler = create_balanced_sampler(
+                y, strategy=strategy, alpha=alpha,
+                boundary_classes=boundary_classes
+            )
+            log_message(f"为{split}数据集创建了{strategy}重采样器，平衡因子: {alpha}, "
+                        f"自动选择边界类别")
+        else:
+            # 其他策略使用默认参数
+            sampler = create_balanced_sampler(y, strategy=strategy, alpha=alpha)
+            log_message(f"为{split}数据集创建了{strategy}重采样器，平衡因子: {alpha}")
+
+        return dataset, sampler
+
     return x, y
 
 
@@ -256,32 +287,48 @@ def load_checkpoint(checkpoint_path=None, model=None, optimizer=None):
 
 if __name__ == "__main__":
     # 记录训练开始信息和配置信息
-    log_message(f"=== 迁移学习训练开始于 {current_time} ===")
+    log_message(f"=== 训练新 ResNet 模型开始于 {current_time} ===")
     log_message(f"BatchSize: {BATCH_SIZE}, Learning Rate: {LEARNING_RATE}, Epochs: {EPOCHS}")
     log_message(f"数据集路径: {DATASET_PATH} (仅使用前{NUM_CLASSES}类)")
+    log_message(f"重采样策略: {SAMPLING_STRATEGY}, 平衡因子: {SAMPLING_ALPHA}")
+
+    # 记录额外的采样策略参数
+    if SAMPLING_STRATEGY == 'top_n_suppression':
+        log_message(f"前{TOP_N_LIMIT}类采样抑制率: {TOP_N_FACTOR}")
+    elif SAMPLING_STRATEGY == 'long_tail_boost':
+        log_message(f"稀有类提升因子: {RARE_BOOST_FACTOR}")
+
     log_message(f"结果保存路径: {RESULTS_PATH}")
-    log_message(f"预训练模型路径: {PRETRAINED_MODEL_PATH}")
+    log_message(f"模型初始化: 随机初始化（无预训练权重）")
     log_message(f"使用设备: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
 
-    train_x, train_y = load_data("train", NUM_CLASSES)
-    valid_x, valid_y = load_data("valid", NUM_CLASSES)
-    test_x, test_y = load_data("test", NUM_CLASSES)  # 加载测试集数据
+    # 使用重采样加载训练数据
+    train_dataset, train_sampler = load_data_with_sampling("train", NUM_CLASSES)
+    valid_x, valid_y = load_data_with_sampling("valid", NUM_CLASSES)
+    test_x, test_y = load_data_with_sampling("test", NUM_CLASSES)  # 加载测试集数据
 
     # 打印数据形状，用于调试
-    log_message(f"最终数据形状 - 训练集: {train_x.shape}, 验证集: {valid_x.shape}, 测试集: {test_x.shape}")
+    log_message(
+        f"最终数据形状 - 训练集: {len(train_dataset)} samples, 验证集: {valid_x.shape if hasattr(valid_x, 'shape') else len(valid_x)}, 测试集: {test_x.shape if hasattr(test_x, 'shape') else len(test_x)}")
 
-    train_dataset = torch.utils.data.TensorDataset(train_x, train_y)
-    val_dataset = torch.utils.data.TensorDataset(valid_x, valid_y)
-    test_dataset = torch.utils.data.TensorDataset(test_x, test_y)  # 创建测试集数据集
-
+    # 使用重采样器创建训练数据加载器
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True,
+        sampler=train_sampler,  # 使用自适应重采样器
         num_workers=12,
         pin_memory=True,
         prefetch_factor=2
     )
+
+    # 处理验证集数据
+    if isinstance(valid_x, tuple) and isinstance(valid_x[0], torch.Tensor):
+        # 如果是元组，说明是数据集和采样器
+        val_dataset = valid_x[0]
+    else:
+        # 否则创建数据集
+        val_dataset = torch.utils.data.TensorDataset(valid_x, valid_y)
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
@@ -289,6 +336,14 @@ if __name__ == "__main__":
         num_workers=12,
         pin_memory=True
     )
+
+    # 处理测试集数据
+    if isinstance(test_x, tuple) and isinstance(test_x[0], torch.Tensor):
+        # 如果是元组，说明是数据集和采样器
+        test_dataset = test_x[0]
+    else:
+        # 否则创建数据集
+        test_dataset = torch.utils.data.TensorDataset(test_x, test_y)
 
     test_loader = DataLoader(
         test_dataset,
@@ -298,20 +353,20 @@ if __name__ == "__main__":
         pin_memory=True
     )
 
-    # 初始化模型 - 替换为加载预训练模型并冻结参数的版本
+    # 初始化全新的模型 - 不加载任何预训练权重
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_pretrained_model(PRETRAINED_MODEL_PATH, NUM_CLASSES).to(device)
+    model = initialize_new_model(NUM_CLASSES).to(device)
 
-    # 损失函数和优化器 - 只优化fc层的参数
+    # 损失函数和优化器 - 所有层都参与训练
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=LEARNING_RATE)
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     start_epoch = 0
     best_val_acc = 0.0
 
     # 记录模型信息
-    log_message(f"模型: ResNet18（迁移学习）, 分类数: {NUM_CLASSES}")
-    log_message(f"只训练最后一层全连接分类层，其他层参数冻结")
+    log_message(f"模型: ResNet18（随机初始化），分类数: {NUM_CLASSES}")
+    log_message(f"所有层参数都参与训练")
     log_message("=" * 50)
 
     # 训练循环

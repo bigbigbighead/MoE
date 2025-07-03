@@ -60,7 +60,6 @@ class SpecializedExpert(nn.Module):
 
     def get_last_layer_weights(self):
         """获取专家分类器最后一层的权重"""
-        # 假设最后一层是线性层
         last_layer = self.classifier[-1]
         if isinstance(last_layer, nn.Linear):
             return last_layer.weight
@@ -82,6 +81,8 @@ class MoE4Model(nn.Module):
         self.num_experts = len(class_ranges)
         self.total_classes = total_classes
         self.dropout_rate = dropout_rate
+        # 添加专家权重参数，默认设为1.0
+        self.expert_weights = [1.0, 1.0, 1.0]
 
         # ResNet18 backbone - 使用从ResNet.py导入的组件
         self.backbone = resnet18_backbone(
@@ -128,13 +129,14 @@ class MoE4Model(nn.Module):
         # 返回特征、各专家输出和相加后的结果
         return feat, expert_outputs, combined_logits
 
-    def inference(self, x):
+    def inference(self, x, alpha1=1.0, alpha2=1.0):
         """
-        推理模式：根据Model design.md中的公式计算每个类别的输出logits
-        使用可学习权重缩放分类器(LWS)调整各专家输出的尺度
+        推理模式：使用E0+α1*E1+α2*E2的方式组合专家输出
 
-        对于每个专家i，输出调整后的logits: ̂z_i = (||w_i||²/||w_1||²)·z_i
-        其中w_i是专家i的全连接层权重，w_1是第一个专家的权重
+        Args:
+            x: 输入张量
+            alpha1: 专家1的权重系数
+            alpha2: 专家2的权重系数
         """
         feat = self.backbone(x)
         batch_size = x.size(0)
@@ -142,32 +144,24 @@ class MoE4Model(nn.Module):
         # 创建一个全零的输出张量
         combined_logits = torch.zeros(batch_size, self.total_classes, device=x.device)
 
-        # 获取各专家最后一层全连接层的权重
-        expert_weights = []
+        # 获取各专家输出
         expert_outputs = []
-        for expert in self.experts:
-            weight = expert.get_last_layer_weights()
-            if weight is not None:
-                # 计算权重的平方范数 ||w||²
-                weight_norm_squared = torch.norm(weight, p=2, dim=1).pow(2).mean()
-                expert_weights.append(weight_norm_squared)
-            else:
-                # 如果无法获取权重，则使用默认值1.0
-                expert_weights.append(torch.tensor(1.0, device=x.device))
-
-        # 使用第一个专家的权重作为参考
-        reference_weight_norm = expert_weights[0]
-
-        # 获取每个专家的输出并根据权重比例调整后相加
         for i, expert in enumerate(self.experts):
             expert_output = expert(feat)
             expert_outputs.append(expert_output)
-            if i >= 0:  # 第一个专家(i=0)的输出不需要调整
-                # 按照公式 ̂z_i = (||w_i||²/||w_1||²)·z_i 进行调整
-                scaling_factor = expert_weights[i] / reference_weight_norm
-                expert_output = expert_output * scaling_factor
 
-            combined_logits += expert_output
+            # 根据专家索引应用相应的权重
+            if i == 0:  # 专家0权重设为1.0
+                weight = 1.0
+            elif i == 1:  # 专家1权重为alpha1
+                weight = alpha1
+            elif i == 2:  # 专家2权重为alpha2
+                weight = alpha2
+            else:
+                weight = 1.0  # 如果有更多专家，默认为1.0
+
+            # 将加权后的专家输出相加
+            combined_logits += expert_output * weight
 
         return expert_outputs, combined_logits
 
