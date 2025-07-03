@@ -13,7 +13,7 @@ from utils.data_loading_downsample import create_balanced_sampler, load_data  # 
 
 # 数据集路径
 DATASET_PATH = "./data/AppClassNet/top200"
-RESULTS_PATH = "results/AppClassNet/top50/ResNet/6"  # 修改路径反映处理前100类
+RESULTS_PATH = "./results/AppClassNet/top50/ResNet/6"  # 修改路径反映处理前100类
 # 移除预训练模型路径配置
 # PRETRAINED_MODEL_PATH = "./results/AppClassNet/top200/ResNet/1/param/model_epoch_800.pth"  # 预训练模型路径
 
@@ -25,6 +25,9 @@ os.makedirs(f"{RESULTS_PATH}/logs", exist_ok=True)  # 确保日志存储目录�
 # 创建日志文件
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 LOG_FILE = f"{RESULTS_PATH}/logs/training_log_{current_time}.txt"
+
+# 配置是否自动恢复训练
+AUTO_RESUME = True  # 如果有检查点则自动恢复训练
 
 
 # 日志记录函数
@@ -49,7 +52,7 @@ def log_message(message, log_file=LOG_FILE):
 # 'inverse_accuracy' - 按分类准确率的倒数加权
 # 'dynamic_difficulty' - 按难易程度动态调整权重
 
-SAMPLING_STRATEGY = 'top_n_suppression'  # 使用前N类抑制采样
+SAMPLING_STRATEGY = 'tiered_importance'  # 使用前N类抑制采样
 SAMPLING_ALPHA = 0.8  # 重采样平衡因子
 TOP_N_LIMIT = 10  # 前10个高频类别
 TOP_N_FACTOR = 0.4  # 降低前N类的采样率至40%
@@ -213,6 +216,56 @@ def validate(model, loader, criterion, device):
     return epoch_loss, epoch_acc, epoch_time
 
 
+# 增强的检查点搜索和加载函数
+def find_latest_checkpoint():
+    """
+    寻找最新的检查点文件
+
+    Returns:
+        checkpoint_path: 最新检查点的路径，如果没找到则返回None
+        is_epoch_checkpoint: 是否是epoch检查点（而非best检查点）
+        checkpoint_epoch: 检查点的轮次，如果是best检查点则为0
+        best_val_acc: 检查点中记录的最佳验���准确率，如果是epoch检查点则可能为0
+    """
+    epoch_checkpoints = glob.glob(f"{RESULTS_PATH}/param/model_epoch_*.pth")
+    best_checkpoints = glob.glob(f"{RESULTS_PATH}/param/best_model_*.pth")
+
+    latest_checkpoint_path = None
+    is_epoch_checkpoint = False
+    checkpoint_epoch = 0
+    best_val_acc = 0.0
+
+    # 检查是否有epoch检查点
+    if epoch_checkpoints:
+        # 提取轮次数并找到最大的
+        try:
+            epochs = [int(f.split('_')[-1].split('.')[0]) for f in epoch_checkpoints]
+            max_epoch_idx = epochs.index(max(epochs))
+            latest_checkpoint_path = epoch_checkpoints[max_epoch_idx]
+            checkpoint_epoch = max(epochs)
+            is_epoch_checkpoint = True
+            log_message(f"找到最新的轮次检查点: {latest_checkpoint_path}，轮次: {checkpoint_epoch}")
+        except Exception as e:
+            log_message(f"解析epoch检查点文件名时出错: {e}")
+
+    # 如果没有epoch检查点或解析出错，查找best模型检查点
+    if latest_checkpoint_path is None and best_checkpoints:
+        try:
+            # 提取准确率并找到最高的
+            accuracies = [float(f.split('_')[-1].split('.pth')[0]) for f in best_checkpoints]
+            best_idx = accuracies.index(max(accuracies))
+            latest_checkpoint_path = best_checkpoints[best_idx]
+            best_val_acc = max(accuracies)
+            log_message(f"找到最佳验证准确率检查点: {latest_checkpoint_path}，准确率: {best_val_acc:.2f}%")
+        except Exception as e:
+            log_message(f"解析best检查点文件名时出错: {e}")
+
+    if latest_checkpoint_path is None:
+        log_message("未找到任何可用的检查点")
+
+    return latest_checkpoint_path, is_epoch_checkpoint, checkpoint_epoch, best_val_acc
+
+
 # 查找并加载模型检查点
 def load_checkpoint(checkpoint_path=None, model=None, optimizer=None):
     """
@@ -228,66 +281,128 @@ def load_checkpoint(checkpoint_path=None, model=None, optimizer=None):
         best_val_acc: 最佳验证准确率
         model: 加载了参数的模型
         optimizer: 加载了状态的优化器
+        resumed: 是否成功恢复了训练
     """
+    resumed = False
     start_epoch = 0
     best_val_acc = 0.0
 
+    # 如果未指定检查点路径，寻找最新的检查点
     if checkpoint_path is None:
-        # 寻找最新的epoch检查点
-        checkpoint_files = glob.glob(f"{RESULTS_PATH}/param/model_epoch_*.pth")
-        if checkpoint_files:
-            # 提取轮次数并找到最大的
-            epochs = [int(f.split('_')[-1].split('.')[0]) for f in checkpoint_files]
-            max_epoch = max(epochs)
-            checkpoint_path = f"{RESULTS_PATH}/param/model_epoch_{max_epoch}.pth"
-            start_epoch = max_epoch  # 从下一个轮次开始
-        else:
-            # 如果没有epoch检查点，寻找最佳验证准确率的检查点
-            best_model_files = glob.glob(f"{RESULTS_PATH}/param/best_model_*.pth")
-            if best_model_files:
-                # 提取准确率并找到最高的
-                accuracies = [float(f.split('_')[-1].split('.pth')[0]) for f in best_model_files]
-                best_idx = accuracies.index(max(accuracies))
-                checkpoint_path = best_model_files[best_idx]
-                best_val_acc = max(accuracies)
+        checkpoint_path, is_epoch_checkpoint, checkpoint_epoch, best_acc = find_latest_checkpoint()
+        if is_epoch_checkpoint:
+            start_epoch = checkpoint_epoch
+        if best_acc > 0:
+            best_val_acc = best_acc
+
+    # 如果没找到检查点，返回未初始化的状态
+    if checkpoint_path is None or not os.path.isfile(checkpoint_path):
+        log_message(f"未找到可用的检查点，将从头开始训练")
+        return start_epoch, best_val_acc, model, optimizer, resumed
+
+    # 尝试加载检查点
+    try:
+        log_message(f"加载检查点: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path,
+                                map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+
+        # 检查检查点类型
+        if isinstance(checkpoint, dict):
+            # 完整检查点
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                log_message("成功加载模型参数")
+
+                if optimizer is not None and 'optimizer_state_dict' in checkpoint:
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    log_message("成功加载优化器状态")
+
+                if 'epoch' in checkpoint:
+                    start_epoch = checkpoint['epoch']
+                    log_message(f"将从第 {start_epoch} 轮开始继续训练")
+
+                if 'best_val_acc' in checkpoint:
+                    best_val_acc = checkpoint['best_val_acc']
+                    log_message(f"记录的最佳验证准确率: {best_val_acc:.2f}%")
+
+                # 显示额外的训练信息
+                if 'val_loss' in checkpoint:
+                    log_message(f"上一次验证损失: {checkpoint['val_loss']:.4f}")
+                if 'train_loss' in checkpoint:
+                    log_message(f"上一次训练损失: {checkpoint['train_loss']:.4f}")
+
+                resumed = True
             else:
-                log_message(f"未找到可用的检查点，将从头开始训练")
-                return start_epoch, best_val_acc, model, optimizer
-
-    # 检查文件是否存在
-    if not os.path.isfile(checkpoint_path):
-        log_message(f"检查点 {checkpoint_path} 不存在，将从头开始训练")
-        return start_epoch, best_val_acc, model, optimizer
-
-    # 加载检查点
-    log_message(f"加载检查点: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path)
-
-    # 检查检查点类型
-    if isinstance(checkpoint, dict):
-        # 完整检查点
-        if 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'])
-            if optimizer is not None and 'optimizer_state_dict' in checkpoint:
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            if 'epoch' in checkpoint:
-                start_epoch = checkpoint['epoch']
-            if 'best_val_acc' in checkpoint:
-                best_val_acc = checkpoint['best_val_acc']
+                # 仅模型参数
+                model.load_state_dict(checkpoint)
+                log_message("加载了仅含模型参数的检查点")
+                resumed = True
         else:
             # 仅模型参数
             model.load_state_dict(checkpoint)
-    else:
-        # 仅模型参数
-        model.load_state_dict(checkpoint)
+            log_message("加载了旧格式的模型检查点")
+            resumed = True
 
-    log_message(f"成功加载检查点，从第 {start_epoch} 轮开始继续训练，当前最佳验证准确率: {best_val_acc:.2f}%")
-    return start_epoch, best_val_acc, model, optimizer
+        log_message(f"成功恢复训练，从第 {start_epoch} 轮开始，当前最佳验证准确率: {best_val_acc:.2f}%")
+
+    except Exception as e:
+        log_message(f"加载检查点时发生错误: {e}")
+        log_message("将从头开始训练")
+
+    return start_epoch, best_val_acc, model, optimizer, resumed
+
+
+# 保存检查点
+def save_checkpoint(model, optimizer, epoch, best_val_acc, val_loss, train_loss, test_acc=None, test_loss=None,
+                    is_best=False):
+    """
+    保存训练检查点
+
+    Args:
+        model: 模型
+        optimizer: 优化器
+        epoch: 当前轮次
+        best_val_acc: 最佳验证准确率
+        val_loss: 验证损失
+        train_loss: 训练损失
+        test_acc: 测试准确率（可选）
+        test_loss: 测试损失（可选）
+        is_best: 是否是最佳模型
+    """
+    checkpoint = {
+        'epoch': epoch + 1,  # 保存下一轮次的起点
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'best_val_acc': best_val_acc,
+        'val_loss': val_loss,
+        'train_loss': train_loss
+    }
+
+    if test_acc is not None:
+        checkpoint['test_acc'] = test_acc
+    if test_loss is not None:
+        checkpoint['test_loss'] = test_loss
+
+    # 保存周期性检查点
+    checkpoint_path = f"{RESULTS_PATH}/param/model_epoch_{epoch + 1}.pth"
+    torch.save(checkpoint, checkpoint_path)
+
+    # 如果是最佳模型，额外保存一份
+    if is_best:
+        best_path = f"{RESULTS_PATH}/param/best_model_{best_val_acc:.2f}.pth"
+        torch.save(checkpoint, best_path)
+        log_message(f"保存新的最佳模型检查点，验证准确率: {best_val_acc:.2f}%")
 
 
 if __name__ == "__main__":
     # 记录训练开始信息和配置信息
-    log_message(f"=== 训练新 ResNet 模型开始于 {current_time} ===")
+    if AUTO_RESUME:
+        log_message(f"=== ResNet 模型训练/恢复开始于 {current_time} ===")
+        log_message(f"自动恢复训练: 已启用（如果找到检查点）")
+    else:
+        log_message(f"=== ResNet 模型训练开始于 {current_time} ===")
+        log_message(f"自动恢复训练: 已禁用")
+
     log_message(f"BatchSize: {BATCH_SIZE}, Learning Rate: {LEARNING_RATE}, Epochs: {EPOCHS}")
     log_message(f"数据集路径: {DATASET_PATH} (仅使用前{NUM_CLASSES}类)")
     log_message(f"重采样策略: {SAMPLING_STRATEGY}, 平衡因子: {SAMPLING_ALPHA}")
@@ -299,7 +414,6 @@ if __name__ == "__main__":
         log_message(f"稀有类提升因子: {RARE_BOOST_FACTOR}")
 
     log_message(f"结果保存路径: {RESULTS_PATH}")
-    log_message(f"模型初始化: 随机初始化（无预训练权重）")
     log_message(f"使用设备: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
 
     # 使用重采样加载训练数据
@@ -353,7 +467,7 @@ if __name__ == "__main__":
         pin_memory=True
     )
 
-    # 初始化全新的模型 - 不加载任何预训练权重
+    # 初始化模型
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = initialize_new_model(NUM_CLASSES).to(device)
 
@@ -361,11 +475,27 @@ if __name__ == "__main__":
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
+    # 初始化训练状态
     start_epoch = 0
     best_val_acc = 0.0
+    training_resumed = False
+
+    # 如果启用了自动恢复，尝试加载最近的检查点
+    if AUTO_RESUME:
+        start_epoch, best_val_acc, model, optimizer, training_resumed = load_checkpoint(
+            checkpoint_path=None,  # 自动寻找最新检查点
+            model=model,
+            optimizer=optimizer
+        )
 
     # 记录模型信息
-    log_message(f"模型: ResNet18（随机初始化），分类数: {NUM_CLASSES}")
+    if training_resumed:
+        log_message(f"模型: ResNet18（从检查点恢复），分类数: {NUM_CLASSES}")
+        log_message(f"恢复训练自第 {start_epoch} 轮，当前最佳验证准确率: {best_val_acc:.2f}%")
+    else:
+        log_message(f"模型: ResNet18（随机初始化），分类数: {NUM_CLASSES}")
+        log_message(f"从第 0 轮开始全新训练")
+
     log_message(f"所有层参数都参与训练")
     log_message("=" * 50)
 
@@ -386,33 +516,27 @@ if __name__ == "__main__":
         log_message(test_message)
         log_message("-" * 50)
 
-        # 保存模型 (最好有个目录来存储)
-        if val_acc > best_val_acc:
+        # 检查是否达到新的最佳验证准确率
+        is_best = val_acc > best_val_acc
+        if is_best:
             best_val_acc = val_acc
-            # 保存更多信息以便恢复训练
-            checkpoint = {
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'best_val_acc': best_val_acc,
-                'val_loss': val_loss,
-                'train_loss': train_loss
-            }
-            torch.save(checkpoint, f"{RESULTS_PATH}/param/best_model_{val_acc:.2f}.pth")
-            log_message(f"保存新的最佳模型，验证准确率: {val_acc:.2f}%")
 
-        # 定期保存模型
-        if (epoch + 1) % 10 == 0:
-            # 同样保存更多信息以便恢复训练
-            checkpoint = {
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'best_val_acc': best_val_acc,
-                'val_loss': val_loss,
-                'train_loss': train_loss
-            }
-            torch.save(checkpoint, f"{RESULTS_PATH}/param/model_epoch_{epoch + 1}.pth")
+        # 使用新函数保存检查点
+        if (epoch + 1) % 10 == 0 or is_best:
+            save_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                epoch=epoch,
+                best_val_acc=best_val_acc,
+                val_loss=val_loss,
+                train_loss=train_loss,
+                test_acc=test_acc,
+                test_loss=test_loss,
+                is_best=is_best
+            )
+
+            if (epoch + 1) % 10 == 0:
+                log_message(f"保存周期性检查点，轮次: {epoch + 1}")
 
     # 训练结束记录
     log_message(f"=== 训练结束于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")

@@ -222,18 +222,16 @@ def create_balanced_sampler(labels, strategy='adaptive_performance', alpha=1.0,
         sorted_classes = sorted(class_ids, key=lambda c: class_counts[c], reverse=True)
         top_n_classes = set(sorted_classes[:top_n_limit])
 
-        log_message(f"使用top_n_suppression策略，降低前{top_n_limit}个高频类别的采样率至{top_n_factor}倍")
+        log_message(f"使用top_n_suppression策略，将前{top_n_limit}个高频类别的权重乘以因子 {top_n_factor}")
 
         for idx, label in enumerate(labels):
             label_item = label.item()
-            # 基础权重是类别频率的倒数
-            base_weight = 1.0 / max(1, class_counts[label_item])
-
             # 如果是高频类别，降低其权重
             if label_item in top_n_classes:
-                weights[idx] = base_weight * top_n_factor
+                weights[idx] = top_n_factor
             else:
-                weights[idx] = base_weight
+                # 其他类别保持默认权重
+                weights[idx] = 1.0
 
     # 新增策略2: 长尾分布提升
     elif strategy == 'long_tail_boost':
@@ -269,7 +267,7 @@ def create_balanced_sampler(labels, strategy='adaptive_performance', alpha=1.0,
         if not boundary_classes:
             sorted_classes = sorted(class_ids, key=lambda c: class_counts[c])
             mid_point = len(sorted_classes) // 2
-            boundary_classes = sorted_classes[mid_point-5:mid_point+5]  # 中间附近的10个类别
+            boundary_classes = sorted_classes[mid_point - 5:mid_point + 5]  # 中间附近的10个类别
 
         log_message(f"使用boundary_focus策略，重点关注的边界类别: {boundary_classes}")
 
