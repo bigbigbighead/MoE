@@ -18,6 +18,8 @@ plt.rcParams['axes.unicode_minus'] = True
 # 分析配置
 MODEL_PATH = f"{RESULTS_PATH}/param/final_model.pth"
 ANALYSIS_RESULTS_PATH = f"{RESULTS_PATH}/analysis"
+colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12', '#9b59b6', '#1abc9c', '#34495e', '#f1c40f', '#e67e22', '#95a5a6',
+          '#d35400', '#8e44ad']  # 蓝色、绿色、红色、橙色、紫色、青色、深蓝色、黄色、橙红色、灰色、深橙色、深紫色
 
 # 创建分析日志文件
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -124,8 +126,8 @@ def plot_per_class_accuracy(per_class_accuracy, per_class_total, class_ranges):
 
     plt.figure(figsize=(20, 8))
 
-    # 每个专家负责的类别用不同颜色表示
-    colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12']  # 蓝色、绿色、红色、橙色
+    # # 每个专家负责的类别用不同颜色表示
+    # colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12']  # 蓝色、绿色、红色、橙色
 
     for i, (start_class, end_class) in enumerate(class_ranges):
         class_range = list(range(start_class, end_class + 1))
@@ -195,7 +197,7 @@ def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANG
     # 由于类别数量较多，可以尝试分块可视化混淆矩阵
     # 1. 首先保存完整的混淆矩阵
     plt.figure(figsize=(16, 14))
-    sns.heatmap(cm_normalized, cmap="YlGnBu", vmin=0, vmax=1)
+    sns.heatmap(cm_normalized, cmap="Reds", vmin=0, vmax=1)
     plt.xlabel('Predicted Label')
     plt.ylabel('True Label')
     plt.title('Normalized Confusion Matrix (Full)')
@@ -205,16 +207,43 @@ def create_confusion_matrix(preds, targets, num_classes, class_ranges=CLASS_RANG
     # 2. 然后按照专家负责的类别范围分块可视化
     for i, (start_class, end_class) in enumerate(class_ranges):
         plt.figure(figsize=(14, 12))
-        sns.heatmap(cm_normalized[start_class:end_class + 1, :], cmap="YlGnBu", vmin=0, vmax=0.5)
+
+        # 创建真实的y轴标签列表
+        y_labels = list(range(start_class, end_class + 1))
+
+        # 当类别数量过多时，设置间隔显示标签
+        if (end_class - start_class) >= 80:
+            # 计算合适的间隔
+            label_interval = max(4, (end_class - start_class) // 20)
+
+            # 创建新的标签列表，只在特定间隔显示
+            sparse_labels = []
+            for idx, label in enumerate(y_labels):
+                if (label - start_class) % label_interval == 0:
+                    sparse_labels.append(str(label))
+                else:
+                    sparse_labels.append('')
+
+            # 使用间隔标签绘制热图
+            sns.heatmap(cm_normalized[start_class:end_class + 1, :],
+                        cmap="Reds", vmin=0, vmax=0.5,
+                        yticklabels=sparse_labels)
+        else:
+            # 类别数量不多时正常显示所有标签
+            sns.heatmap(cm_normalized[start_class:end_class + 1, :],
+                        cmap="Reds", vmin=0, vmax=0.5,
+                        yticklabels=y_labels)
+
         plt.xlabel('Predicted Label')
         plt.ylabel('True Label')
         plt.title(f'Confusion Matrix for Expert {i + 1} Classes ({start_class}-{end_class})')
-        plt.savefig(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix_expert{i + 1}.png", dpi=300, bbox_inches='tight')
+        plt.savefig(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix_expert{i}.png", dpi=300, bbox_inches='tight')
         plt.close()
 
     # 保存原始混淆矩阵数据以便进一步分析
-    np.save(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix.npy", cm)
-    np.save(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix_normalized.npy", cm_normalized)
+    # 将混淆矩阵保存为CSV文件，使用pandas DataFrame
+    pd.DataFrame(cm).to_csv(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix.csv")
+    pd.DataFrame(cm_normalized).to_csv(f"{ANALYSIS_RESULTS_PATH}/confusion_matrix_normalized.csv")
 
     return cm, cm_normalized
 
@@ -266,7 +295,7 @@ def analyze_misclassified(cm, cm_normalized, class_ranges):
     fig, ax = plt.subplots(figsize=(12, 8))
 
     # 设置不同专家的颜色
-    colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12']  # 蓝色、绿色、红色、橙色
+    # colors = ['#3498db', '#2ecc71', '#e74c3c', '#f39c12']  # 蓝色、绿色、红色、橙色
 
     # 按专家分组并绘制
     for i, (start, end) in enumerate(class_ranges):
@@ -342,7 +371,7 @@ def analyze_misclassified(cm, cm_normalized, class_ranges):
 
     # 可视化专家间的错误流动
     plt.figure(figsize=(10, 8))
-    sns.heatmap(expert_flow_norm, annot=True, fmt=".2%", cmap="YlGnBu",
+    sns.heatmap(expert_flow_norm, annot=True, fmt=".2%", cmap="Reds",
                 xticklabels=[f"Expert {i + 1}" for i in range(len(class_ranges))],
                 yticklabels=[f"Expert {i + 1}" for i in range(len(class_ranges))])
     plt.xlabel('Predicted Expert')
